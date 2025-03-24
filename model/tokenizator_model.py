@@ -7,12 +7,12 @@ import numpy as np
 import pandas as pd
 import logging
 import lightgbm as lgb
-from typing import Tuple, List, Dict, Any, Optional, Union
+from typing import Tuple, List, Dict, Optional, Union
 from sklearn.preprocessing import StandardScaler
 
-# Импорт из проекта
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from .preprocessing import preprocess_data
-from .feature_selection import analyze_correlations, select_features_rfecv, group_features
+from .feature_selection import analyze_correlations, group_features, select_features_from_model
 from .model_training import train_model, find_optimal_threshold, predict
 from .hyperparameter_tuning import optimize_hyperparameters
 from .evaluation import evaluate_model, compute_lift
@@ -102,7 +102,7 @@ class TokenizatorModel:
 
     def select_features(self, X: pd.DataFrame, y: pd.Series, k: int = 100) -> Tuple[pd.DataFrame, List[str]]:
         """
-        Выбор топ-k признаков с использованием RFECV
+        Выбор топ-k признаков с использованием SelectFromModel
 
         Args:
             X: DataFrame с признаками
@@ -112,10 +112,10 @@ class TokenizatorModel:
         Returns:
             Tuple[pd.DataFrame, List[str]]: DataFrame с выбранными признаками и список выбранных признаков
         """
-        logger.info(f"Выбор топ-{k} признаков с использованием RFECV")
+        logger.info(f"Выбор топ-{k} признаков с использованием SelectFromModel")
 
         # Вызов функции выбора признаков
-        X_selected, selected_features = select_features_rfecv(X, y)
+        X_selected, selected_features = select_features_from_model(X, y, random_state=self.random_state, k=k)
 
         # Сохранение выбранных признаков
         self.selected_features = selected_features
@@ -204,8 +204,6 @@ class TokenizatorModel:
                 y_pred_proba = model.predict_proba(X_val_current)[:, 1]
 
                 # Расчет метрик
-                from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-
                 results[group] = {
                     'accuracy': accuracy_score(y_val, y_pred),
                     'precision': precision_score(y_val, y_pred),

@@ -6,7 +6,7 @@ import re
 import logging
 from typing import Tuple, List, Dict
 import lightgbm as lgb
-from sklearn.feature_selection import RFE, RFECV
+from sklearn.feature_selection import RFE, SelectFromModel
 
 logger = logging.getLogger(__name__)
 
@@ -87,44 +87,52 @@ def select_features_rfe(X: pd.DataFrame, y: pd.Series, k: int = 100,
     return X_selected, selected_features
 
 
-def select_features_rfecv(X: pd.DataFrame, y: pd.Series,
-                          random_state: int = 42) -> Tuple[pd.DataFrame, List[str]]:
+def select_features_from_model(X: pd.DataFrame, y: pd.Series,
+                               random_state: int = 42,
+                               threshold: str = 'mean',
+                               k: int = 100) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Выбор признаков с использованием RFECV с кросс-валидацией
+    Выбор признаков с использованием SelectFromModel и LightGBM
 
     Args:
         X: DataFrame с признаками
         y: Серия целевых значений
         random_state: Seed для генератора случайных чисел
+        threshold: Порог для отбора признаков ('mean', 'median', или числовое значение)
+        k: Максимальное количество признаков для выбора
 
     Returns:
         Tuple[pd.DataFrame, List[str]]: DataFrame с выбранными признаками и список выбранных признаков
     """
-    logger.info("Выбор признаков с использованием RFECV с кросс-валидацией")
+
+    logger.info(f"Выбор признаков с использованием SelectFromModel (threshold={threshold}, max_k={k})")
 
     # Инициализация классификатора LightGBM
     estimator = lgb.LGBMClassifier(
         objective='binary',
         boosting_type='gbdt',
         n_estimators=100,
-        random_state=random_state
+        importance_type='gain',
+        random_state=random_state,
+        verbose=-1
     )
 
-    # Инициализация RFECV
-    selector = RFECV(
+    # Обучение базовой модели на всех признаках
+    estimator.fit(X, y)
+
+    # Инициализация селектора признаков
+    selector = SelectFromModel(
         estimator=estimator,
-        step=10,
-        cv=5,
-        scoring='f1',
-        verbose=1,
-        n_jobs=-1
+        threshold=threshold,
+        prefit=True,
+        max_features=k
     )
 
-    # Обучение селектора
-    selector.fit(X, y)
+    # Получение маски выбранных признаков
+    feature_mask = selector.get_support()
 
     # Получение выбранных признаков
-    selected_features = X.columns[selector.support_].tolist()
+    selected_features = X.columns[feature_mask].tolist()
 
     logger.info(f"Выбрано {len(selected_features)} признаков")
 

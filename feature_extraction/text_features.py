@@ -174,7 +174,7 @@ class TextFeatureExtractor(BaseExtractor):
 
         # Сбор эмбеддингов в пакетном режиме
         all_embeddings = []
-        batch_size = BATCH_SIZE  # Уменьшите до 16 или 8 для большей стабильности
+        batch_size = BATCH_SIZE
         max_length = MAX_TEXT_LENGTH
 
         logger.info(f"Сбор эмбеддингов BERTweet с размером пакета {batch_size} и max_length={max_length}...")

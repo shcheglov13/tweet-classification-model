@@ -6,7 +6,7 @@ import os
 import argparse
 import mlflow
 from typing import Tuple
-
+import lightgbm
 from data_loader import load_data
 from feature_extraction.feature_manager import FeatureExtractor
 from model.tokenizator_model import TokenizatorModel
@@ -174,9 +174,13 @@ def train_tokenizator_model(data_file: str, output_dir: str, threshold: float = 
 
         # 20. Визуализация кривой обучения
         logger.info("Визуализация кривой обучения...")
-        import lightgbm as lgb
+
+        lgb_model = lightgbm.LGBMClassifier(
+            random_state=random_state,
+            feature_name='auto'
+        )
         visualize_learning_curve(
-            lgb.LGBMClassifier(random_state=random_state),
+            lgb_model,
             X_train_selected, y_train,
             output_path=os.path.join(output_dir, 'learning_curve.png')
         )

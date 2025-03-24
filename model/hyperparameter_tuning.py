@@ -66,8 +66,7 @@ def objective_factory(X_train: pd.DataFrame, y_train: pd.Series,
 
         # Обучение модели
         callbacks = [
-            lgb.early_stopping(50),
-            lgb.log_evaluation(0)
+            lgb.early_stopping(50)
         ]
 
         model = lgb.train(
