@@ -1,4 +1,3 @@
-# visualization/shap_viz.py
 """Функции для визуализации SHAP значений для интерпретации модели"""
 
 import os
@@ -7,7 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import logging
 import shap
-from typing import Any, Optional, List, Dict, Union
+from typing import Any
 
 logger = logging.getLogger(__name__)
 

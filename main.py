@@ -1,17 +1,12 @@
-# main.py
 """
 Основной скрипт для обучения и оценки модели классификации твитов
 """
 
 import os
-import logging
 import argparse
-import pandas as pd
-import numpy as np
 import mlflow
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple
 
-# Импорт из проекта
 from data_loader import load_data
 from feature_extraction.feature_manager import FeatureExtractor
 from model.tokenizator_model import TokenizatorModel
@@ -21,14 +16,13 @@ from visualization.performance_viz import (visualize_confusion_matrix, visualize
                                            visualize_learning_curve, visualize_lift)
 from visualization.shap_viz import visualize_shap_values
 from utils.logging_utils import setup_logger
-from config import DEFAULT_RANDOM_STATE, DEFAULT_THRESHOLD, DEFAULT_MODEL_PATH, DEFAULT_DATA_FILE
+from config import DEFAULT_RANDOM_STATE, DEFAULT_THRESHOLD, DEFAULT_DATA_FILE
 
 logger = setup_logger()
 
 
 def train_tokenizator_model(data_file: str, output_dir: str, threshold: float = DEFAULT_THRESHOLD,
-                            random_state: int = DEFAULT_RANDOM_STATE) -> Tuple[
-    TokenizatorModel, pd.DataFrame, pd.Series]:
+                            random_state: int = DEFAULT_RANDOM_STATE) -> None:
     """
     Обучение и оценка модели классификации твитов
 

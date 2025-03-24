@@ -1,4 +1,3 @@
-# utils/logging_utils.py
 """Настройка логирования для проекта Tokenizator"""
 
 import logging

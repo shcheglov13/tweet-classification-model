@@ -1,11 +1,9 @@
-# data_loader.py
 """Функции для загрузки данных из различных источников"""
 
 import os
 import json
 import pandas as pd
 import logging
-from typing import Any, Dict, List, Union
 
 logger = logging.getLogger(__name__)
 

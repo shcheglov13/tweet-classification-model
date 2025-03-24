@@ -1,4 +1,3 @@
-# feature_extraction/emotional_features.py
 """Модуль для извлечения эмоциональных признаков из твитов"""
 
 import os
@@ -7,7 +6,6 @@ import pandas as pd
 import torch
 import logging
 from tqdm import tqdm
-from typing import List, Dict, Any, Optional
 from transformers import AutoTokenizer, RobertaForSequenceClassification
 
 from .base_extractor import BaseExtractor
@@ -107,14 +105,6 @@ class EmotionalFeatureExtractor(BaseExtractor):
 
             # Расчет эмоциональной интенсивности (сумма всех вероятностей эмоций)
             emotional_df.at[idx, 'emotional_intensity'] = sum(emotion_probs)
-
-            # Расчет согласованности текст-изображение если изображение присутствует
-            if row['image_url'] and row['image_url'] != "":
-                # На данный момент установим заполнитель - в реальной реализации
-                # мы бы сравнивали текстовые и изображения эмбеддинги
-                emotional_df.at[idx, 'text_image_coherence'] = 0.5
-            else:
-                emotional_df.at[idx, 'text_image_coherence'] = 0
 
         # Сохранение в кеш
         self.save_to_cache(emotional_df, 'emotional')

@@ -1,17 +1,10 @@
-# predict.py
 """
 Скрипт для использования обученной модели для предсказаний на новых данных
 """
 
-import os
-import sys
-import logging
 import argparse
 import pandas as pd
-import numpy as np
-from typing import Dict, Any, Optional, Tuple
-
-# Импорт из проекта
+from typing import Dict, Optional, Tuple
 from model.tokenizator_model import TokenizatorModel
 from feature_extraction.feature_manager import FeatureExtractor
 from utils.logging_utils import setup_logger

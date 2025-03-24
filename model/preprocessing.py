@@ -1,11 +1,9 @@
-# model/preprocessing.py
 """Функции для предобработки данных перед обучением модели"""
 
-import numpy as np
 import pandas as pd
 import logging
 from sklearn.preprocessing import StandardScaler
-from typing import Tuple, Optional, List, Dict, Any
+from typing import Tuple, Optional
 
 logger = logging.getLogger(__name__)
 

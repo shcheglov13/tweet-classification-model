@@ -1,4 +1,3 @@
-# config.py
 """Конфигурационный файл для проекта Tokenizator"""
 
 import os
@@ -26,7 +25,7 @@ EMOTION_LABELS = [
 ]
 
 # Параметры обработки
-MAX_TEXT_LENGTH = 256
+MAX_TEXT_LENGTH = 128
 BATCH_SIZE = 32
 TEXT_PCA_COMPONENTS = 90
 IMAGE_PCA_COMPONENTS = 80

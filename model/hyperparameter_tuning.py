@@ -1,13 +1,11 @@
-# model/hyperparameter_tuning.py
 """Функции для оптимизации гиперпараметров модели LightGBM"""
 
-import numpy as np
 import pandas as pd
 import logging
 import lightgbm as lgb
 import optuna
 from sklearn.metrics import f1_score
-from typing import Dict, Optional, Tuple, List, Any, Callable
+from typing import Dict, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +65,17 @@ def objective_factory(X_train: pd.DataFrame, y_train: pd.Series,
         val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
 
         # Обучение модели
+        callbacks = [
+            lgb.early_stopping(50),
+            lgb.log_evaluation(0)
+        ]
+
         model = lgb.train(
             params,
             train_data,
             valid_sets=[val_data],
             num_boost_round=1000,
-            early_stopping_rounds=50,
-            verbose_eval=False
+            callbacks=callbacks
         )
 
         # Получение предсказаний на валидационной выборке

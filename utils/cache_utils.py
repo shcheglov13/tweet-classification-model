@@ -4,7 +4,7 @@ import os
 import pickle
 import pandas as pd
 import hashlib
-from typing import Any, Optional, Tuple
+from typing import Any
 
 
 def ensure_cache_dir(cache_dir: str) -> None:

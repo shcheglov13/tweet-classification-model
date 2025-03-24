@@ -1,7 +1,5 @@
-# visualization/performance_viz.py
 """Функции для визуализации метрик производительности модели"""
 
-import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -10,8 +8,7 @@ import logging
 
 from sklearn.calibration import calibration_curve
 from sklearn.model_selection import learning_curve
-import lightgbm as lgb
-from typing import Tuple, List, Dict, Any, Optional, Union
+from typing import Any
 
 logger = logging.getLogger(__name__)
 

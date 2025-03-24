@@ -1,4 +1,3 @@
-# model/model_training.py
 """Функции для обучения модели классификации твитов"""
 
 import numpy as np
@@ -6,7 +5,7 @@ import pandas as pd
 import logging
 import lightgbm as lgb
 from sklearn.model_selection import train_test_split
-from typing import Tuple, Dict, List, Any, Optional
+from typing import Tuple, Dict, List, Optional
 from sklearn.metrics import f1_score, precision_score, recall_score
 
 logger = logging.getLogger(__name__)
@@ -99,8 +98,8 @@ def train_model(X_train: pd.DataFrame, y_train: pd.Series,
 
     # Обучение модели
     callbacks = [
-        lgb.log_evaluation(100),
-        lgb.early_stopping(50)
+        lgb.early_stopping(50),
+        lgb.log_evaluation(0)
     ]
 
     model = lgb.train(

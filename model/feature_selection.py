@@ -1,13 +1,12 @@
-# model/feature_selection.py
 """Функции для анализа и отбора признаков"""
 
 import numpy as np
 import pandas as pd
 import re
 import logging
-from typing import Tuple, List, Dict, Any, Optional
-from sklearn.feature_selection import RFE, RFECV
+from typing import Tuple, List, Dict
 import lightgbm as lgb
+from sklearn.feature_selection import RFE, RFECV
 
 logger = logging.getLogger(__name__)
 
@@ -153,8 +152,8 @@ def group_features(X: pd.DataFrame) -> Dict[str, List[str]]:
         'text_metrics': 'text_|word_count|avg_word_length',
         'informal_slang': 'uppercase_ratio|word_elongation|excessive_punctuation|perplexity',
         'clip': 'clip_emb_',
-        'emotional': 'emotion_|emotional_|coherence',
-        'structural': 'tweet_type|has_|text_quoted_ratio|diversity',
+        'emotional': 'emotion_|emotional_',
+        'structural': 'tweet_type|has_image',
         'temporal': 'hour|day_of_week|is_weekend'
     }
 

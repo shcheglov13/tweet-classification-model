@@ -1,13 +1,10 @@
-# visualization/feature_viz.py
 """Функции для визуализации признаков и их важности"""
 
-import os
-import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import logging
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
 

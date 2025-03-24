@@ -1,4 +1,3 @@
-# feature_extraction/base_extractor.py
 """Базовый класс для всех экстракторов признаков"""
 
 import os
@@ -6,7 +5,7 @@ import torch
 import logging
 import pandas as pd
 from abc import ABC, abstractmethod
-from typing import Tuple, List, Dict, Any, Optional, Union
+from typing import Optional
 
 import sys
 

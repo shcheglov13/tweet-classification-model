@@ -10,7 +10,7 @@ import logging
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModel
 from sklearn.decomposition import PCA
-from typing import List, Dict, Tuple, Optional, Any, Union
+from typing import List
 
 from .base_extractor import BaseExtractor
 import sys
@@ -161,15 +161,7 @@ class TextFeatureExtractor(BaseExtractor):
             metrics_df.at[idx, 'emoji_density'] = len(emojis) / combined_length
 
     def _extract_bertweet_embeddings(self, df: pd.DataFrame) -> List[np.ndarray]:
-        """
-        Извлечение эмбеддингов BERTweet для всех твитов
-
-        Args:
-            df: DataFrame с данными твитов
-
-        Returns:
-            List[np.ndarray]: Список эмбеддингов для всех твитов
-        """
+        """Извлечение эмбеддингов BERTweet для всех твитов"""
         logger.info("Извлечение эмбеддингов BERTweet...")
 
         # Сбор всех текстов
@@ -182,12 +174,14 @@ class TextFeatureExtractor(BaseExtractor):
 
         # Сбор эмбеддингов в пакетном режиме
         all_embeddings = []
-        batch_size = BATCH_SIZE
+        batch_size = BATCH_SIZE  # Уменьшите до 16 или 8 для большей стабильности
         max_length = MAX_TEXT_LENGTH
 
         logger.info(f"Сбор эмбеддингов BERTweet с размером пакета {batch_size} и max_length={max_length}...")
         for i in tqdm(range(0, len(all_texts), batch_size), desc="Сбор эмбеддингов текста"):
             batch_texts = all_texts[i:i + batch_size]
+            # Создаем словарь для сопоставления индексов
+            embeddings_map = {}
 
             try:
                 # Обрабатываем только непустые тексты
@@ -200,33 +194,42 @@ class TextFeatureExtractor(BaseExtractor):
 
                 valid_texts = [batch_texts[j] for j in valid_indices]
 
-                # Токенизация и подготовка для модели
-                inputs = self.bertweet_tokenizer(
-                    valid_texts,
-                    return_tensors="pt",
-                    max_length=max_length,
-                    padding="max_length",
-                    truncation=True
-                ).to(self.device)
+                valid_embeddings_list = []
 
-                # Получение эмбеддингов
-                with torch.no_grad():
-                    outputs = self.bertweet_model(**inputs)
-                    # Получение эмбеддингов из последнего слоя, среднее объединение по токенам
-                    valid_embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
+                for text in valid_texts:
+                    try:
+                        inputs = self.bertweet_tokenizer(
+                            text,
+                            return_tensors="pt",
+                            max_length=max_length,
+                            padding="max_length",
+                            truncation=True
+                        ).to(self.device)
 
-                # Добавляем эмбеддинги в общий список (с учетом пустых текстов)
-                emb_idx = 0
+                        with torch.no_grad():
+                            outputs = self.bertweet_model(**inputs)
+                            emb = outputs.last_hidden_state.mean(dim=1).cpu().numpy()[0]
+                            valid_embeddings_list.append(emb)
+
+                        # Очистка памяти после каждого текста
+                        del inputs, outputs
+                        if self.device == 'cuda':
+                            torch.cuda.empty_cache()
+
+                    except Exception as text_e:
+                        logger.warning(f"Ошибка обработки текста: {text_e}")
+                        valid_embeddings_list.append(np.zeros(768))
+
+                # Сопоставляем индексы с эмбеддингами
+                for orig_idx, emb in zip(valid_indices, valid_embeddings_list):
+                    embeddings_map[orig_idx] = emb
+
+                # Добавляем эмбеддинги в порядке оригинальных индексов
                 for j in range(len(batch_texts)):
-                    if j in valid_indices:
-                        all_embeddings.append(valid_embeddings[emb_idx])
-                        emb_idx += 1
+                    if j in embeddings_map:
+                        all_embeddings.append(embeddings_map[j])
                     else:
                         all_embeddings.append(np.zeros(768))
-
-                # Очистка памяти после каждого пакета
-                del inputs, outputs
-                torch.cuda.empty_cache()
 
             except Exception as e:
                 logger.error(f"Ошибка извлечения эмбеддингов для пакета {i}: {e}")

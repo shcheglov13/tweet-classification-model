@@ -1,14 +1,12 @@
-# model/evaluation.py
 """Функции для оценки модели и расчета различных метрик производительности"""
 
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, List, Any, Union, Optional, Tuple
+from typing import Dict
 from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
                              roc_auc_score, precision_recall_curve, auc,
-                             confusion_matrix, classification_report, average_precision_score,
-                             roc_curve)
+                             confusion_matrix, classification_report)
 import lightgbm as lgb
 
 logger = logging.getLogger(__name__)

@@ -1,4 +1,3 @@
-# feature_extraction/visual_features.py
 """Модуль для извлечения визуальных признаков из изображений в твитах"""
 
 import os
@@ -11,7 +10,7 @@ import requests
 from io import BytesIO
 from PIL import Image
 from tqdm import tqdm
-from typing import Tuple, List, Dict, Any, Optional
+from typing import Tuple, List
 from sklearn.decomposition import PCA
 from transformers import CLIPProcessor, CLIPModel
 
@@ -191,7 +190,28 @@ class VisualFeatureExtractor(BaseExtractor):
                     return np.zeros(768), False  # Недоступное изображение
 
                 img = Image.open(BytesIO(response.content))
-                img.save(cache_file)  # Сохранение для будущего использования
+
+                # Преобразование формата изображения перед сохранением в JPEG
+                if img.mode in ('RGBA', 'LA'):
+                    # Обработка изображений с прозрачностью
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    if 'A' in img.mode:  # Проверяем наличие альфа-канала
+                        background.paste(img, mask=img.split()[3])  # 3 - альфа-канал
+                    else:
+                        background.paste(img)
+                    img_to_save = background
+                elif img.mode != 'RGB':
+                    # Обработка других режимов (P, L и т.д.)
+                    img_to_save = img.convert('RGB')
+                else:
+                    img_to_save = img
+
+                # Сохранение для будущего использования
+                try:
+                    img_to_save.save(cache_file, format='JPEG', quality=95)
+                except Exception as save_err:
+                    logger.warning(f"Не удалось сохранить кеш изображения: {save_err}")
+                    # Продолжаем работу даже если не удалось сохранить
 
             # Обработка изображения через CLIP
             inputs = self.clip_processor(images=img, return_tensors="pt").to(self.device)

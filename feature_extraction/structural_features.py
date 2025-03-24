@@ -1,4 +1,3 @@
-# feature_extraction/structural_features.py
 """Модуль для извлечения структурных признаков из твитов"""
 
 import os
@@ -7,7 +6,7 @@ import pandas as pd
 import torch
 import logging
 from tqdm import tqdm
-from typing import List, Dict, Any, Optional
+from typing import List
 
 from .base_extractor import BaseExtractor
 import sys

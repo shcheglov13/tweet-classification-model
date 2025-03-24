@@ -1,12 +1,10 @@
-# feature_extraction/feature_manager.py
 """Класс-оркестратор для управления извлечением признаков"""
 
 import os
 import torch
 import logging
 import pandas as pd
-from tqdm import tqdm
-from typing import Tuple, List, Dict, Any, Optional
+from typing import Tuple, List
 
 from .text_features import TextFeatureExtractor
 from .visual_features import VisualFeatureExtractor
