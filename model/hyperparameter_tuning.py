@@ -1,5 +1,6 @@
 """Функции для оптимизации гиперпараметров модели LightGBM"""
 
+import numpy as np
 import pandas as pd
 import logging
 import lightgbm as lgb
@@ -10,17 +11,18 @@ from typing import Dict, Callable
 logger = logging.getLogger(__name__)
 
 
-def objective_factory(X_train: pd.DataFrame, y_train: pd.Series,
-                      X_val: pd.DataFrame, y_val: pd.Series,
-                      random_state: int = 42) -> Callable:
+def objective_factory(
+        X_train_val: pd.DataFrame,
+        y_train_val: pd.Series,
+        kfold,
+        random_state: int = 42) -> Callable:
     """
-    Создает функцию цели для оптимизации Optuna
+    Создает функцию цели для оптимизации Optuna с использованием кросс-валидации
 
     Args:
-        X_train: DataFrame с признаками обучающей выборки
-        y_train: Серия целевых значений обучающей выборки
-        X_val: DataFrame с признаками валидационной выборки
-        y_val: Серия целевых значений валидационной выборки
+        X_train_val: DataFrame с признаками обучающей+валидационной выборки
+        y_train_val: Серия целевых значений обучающей+валидационной выборки
+        kfold: Объект кросс-валидации
         random_state: Seed для генератора случайных чисел
 
     Returns:
@@ -60,56 +62,69 @@ def objective_factory(X_train: pd.DataFrame, y_train: pd.Series,
             'verbose': -1
         }
 
-        # Создание объектов датасета
-        train_data = lgb.Dataset(X_train, label=y_train)
-        val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+        # Инициализация массива для хранения F1-scores по фолдам
+        f1_scores = []
 
-        # Обучение модели
-        callbacks = [
-            lgb.early_stopping(50)
-        ]
+        # Кросс-валидация
+        for train_idx, val_idx in kfold.split(X_train_val, y_train_val):
+            # Разделение данных для текущего фолда
+            X_train_fold, X_val_fold = X_train_val.iloc[train_idx], X_train_val.iloc[val_idx]
+            y_train_fold, y_val_fold = y_train_val.iloc[train_idx], y_train_val.iloc[val_idx]
 
-        model = lgb.train(
-            params,
-            train_data,
-            valid_sets=[val_data],
-            num_boost_round=1000,
-            callbacks=callbacks
-        )
+            # Создание объектов датасета
+            train_data = lgb.Dataset(X_train_fold, label=y_train_fold)
+            val_data = lgb.Dataset(X_val_fold, label=y_val_fold, reference=train_data)
 
-        # Получение предсказаний на валидационной выборке
-        y_pred_val = model.predict(X_val)
+            # Обучение модели
+            callbacks = [
+                lgb.early_stopping(50)
+            ]
 
-        # Расчет F1-score (наша метрика оптимизации)
-        y_pred_binary = (y_pred_val > 0.5).astype(int)
-        f1 = f1_score(y_val, y_pred_binary)
+            model = lgb.train(
+                params,
+                train_data,
+                valid_sets=[val_data],
+                num_boost_round=1000,
+                callbacks=callbacks
+            )
 
-        return f1
+            # Получение предсказаний на валидационной выборке
+            y_pred_val = model.predict(X_val_fold)
+
+            # Расчет F1-score
+            y_pred_binary = (y_pred_val > 0.5).astype(int)
+            f1 = f1_score(y_val_fold, y_pred_binary)
+            f1_scores.append(f1)
+
+        # Возвращаем среднее значение F1-score по всем фолдам
+        return np.mean(f1_scores)
 
     return objective
 
 
-def optimize_hyperparameters(X_train: pd.DataFrame, y_train: pd.Series,
-                             X_val: pd.DataFrame, y_val: pd.Series,
-                             n_trials: int = 50, random_state: int = 42) -> Dict:
+def optimize_hyperparameters(
+        X_train_val: pd.DataFrame,
+        y_train_val: pd.Series,
+        kfold,
+        n_trials: int = 50,
+        random_state: int = 42) -> Dict:
     """
-    Оптимизация гиперпараметров с использованием Optuna
+    Оптимизация гиперпараметров с использованием Optuna и кросс-валидации
 
     Args:
-        X_train: DataFrame с признаками обучающей выборки
-        y_train: Серия целевых значений обучающей выборки
-        X_val: DataFrame с признаками валидационной выборки
-        y_val: Серия целевых значений валидационной выборки
+        X_train_val: DataFrame с признаками обучающей+валидационной выборки
+        y_train_val: Серия целевых значений обучающей+валидационной выборки
+        kfold: Объект кросс-валидации
         n_trials: Количество испытаний для оптимизации
         random_state: Seed для генератора случайных чисел
 
     Returns:
         Dict: Лучшие гиперпараметры
     """
-    logger.info(f"Оптимизация гиперпараметров с {n_trials} испытаниями")
+    logger.info(f"Оптимизация гиперпараметров с {n_trials} испытаниями и кросс-валидацией")
 
     # Создание функции цели для Optuna
-    objective = objective_factory(X_train, y_train, X_val, y_val, random_state)
+    objective = objective_factory(X_train_val, y_train_val, kfold, random_state)
 
     # Создание и запуск исследования с параллельной обработкой
     study = optuna.create_study(direction='maximize')
@@ -129,6 +144,6 @@ def optimize_hyperparameters(X_train: pd.DataFrame, y_train: pd.Series,
     best_params['max_bin'] = 63
 
     logger.info(f"Лучшие гиперпараметры: {best_params}")
-    logger.info(f"Лучший F1 score: {study.best_value:.4f}")
+    logger.info(f"Лучший средний F1 score: {study.best_value:.4f}")
 
     return best_params

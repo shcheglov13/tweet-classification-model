@@ -7,6 +7,8 @@ import argparse
 import mlflow
 from typing import Tuple
 import lightgbm
+import pandas as pd
+
 from data_loader import load_data
 from feature_extraction.feature_manager import FeatureExtractor
 from model.tokenizator_model import TokenizatorModel
@@ -21,8 +23,13 @@ from config import DEFAULT_RANDOM_STATE, DEFAULT_THRESHOLD, DEFAULT_DATA_FILE
 logger = setup_logger()
 
 
-def train_tokenizator_model(data_file: str, output_dir: str, threshold: float = DEFAULT_THRESHOLD,
-                            random_state: int = DEFAULT_RANDOM_STATE) -> None:
+def train_tokenizator_model(
+        data_file: str,
+        output_dir: str,
+        threshold: float = DEFAULT_THRESHOLD,
+        random_state: int = DEFAULT_RANDOM_STATE,
+        n_splits: int = 5,
+        test_size: float = 0.2) -> Tuple[TokenizatorModel, pd.DataFrame, pd.Series]:
     """
     Обучение и оценка модели классификации твитов
 
@@ -31,6 +38,8 @@ def train_tokenizator_model(data_file: str, output_dir: str, threshold: float = 
         output_dir: Директория для сохранения результатов
         threshold: Порог для бинаризации
         random_state: Seed для генератора случайных чисел
+        n_splits: Количество фолдов для кросс-валидации
+        test_size: Размер тестовой выборки (0-1)
 
     Returns:
         Tuple: Обученная модель, тестовые признаки и тестовые целевые значения
@@ -96,39 +105,42 @@ def train_tokenizator_model(data_file: str, output_dir: str, threshold: float = 
         logger.info("Группировка признаков по типу...")
         feature_groups = model.group_features(X_reduced)
 
-        # 7. Разделение данных
-        logger.info("Разделение данных...")
-        X_train, X_val, X_test, y_train, y_val, y_test = model.split_data(X_reduced, y_binary)
+        # 7. Разделение данных с использованием кросс-валидации
+        logger.info(f"Разделение данных с {n_splits}-фолдовой кросс-валидацией...")
+        X_train_val, X_test, y_train_val, y_test, kfold = model.split_data(
+            X_reduced, y_binary, n_splits=n_splits, test_size=test_size)
 
         # Логирование информации о разделении
-        mlflow.log_param("train_size", X_train.shape[0])
-        mlflow.log_param("val_size", X_val.shape[0])
-        mlflow.log_param("test_size", X_test.shape[0])
+        mlflow.log_param("n_splits", n_splits)
+        mlflow.log_param("test_size", test_size)
+        mlflow.log_param("train_val_size", X_train_val.shape[0])
+        mlflow.log_param("test_size_actual", X_test.shape[0])
 
-        # 8. Выбор признаков
-        logger.info("Выбор признаков...")
-        X_train_selected, selected_features = model.select_features(X_train, y_train, k=100)
-        X_val_selected = X_val[selected_features]
+        # 8. Выбор признаков с использованием кросс-валидации
+        logger.info("Выбор признаков с кросс-валидацией...")
+        X_train_val_selected, selected_features = model.select_features(
+            X_train_val, y_train_val, kfold, k=100)
         X_test_selected = X_test[selected_features]
 
         # Логирование информации о выборе признаков
         mlflow.log_param("selected_features_count", len(selected_features))
 
-        # 9. Инкрементальная оценка признаков
-        logger.info("Инкрементальная оценка групп признаков...")
-        incremental_results = model.incremental_feature_evaluation(X_train, y_train, X_val, y_val)
+        # 9. Инкрементальная оценка признаков с кросс-валидацией
+        logger.info("Инкрементальная оценка групп признаков с кросс-валидацией...")
+        incremental_results = model.incremental_feature_evaluation(
+            X_train_val, y_train_val, kfold)
 
-        # 10. Обучение модели
-        logger.info("Обучение модели...")
-        model.train(X_train_selected, y_train, X_val_selected, y_val)
+        # 10. Обучение модели с кросс-валидацией
+        logger.info("Обучение модели с кросс-валидацией...")
+        fold_results = model.train(X_train_val_selected, y_train_val, kfold)
 
-        # 11. Оптимизация гиперпараметров
-        logger.info("Оптимизация гиперпараметров...")
-        model.optimize_hyperparameters(X_train_selected, y_train, X_val_selected, y_val, n_trials=30)
+        # 11. Оптимизация гиперпараметров с кросс-валидацией
+        logger.info("Оптимизация гиперпараметров с кросс-валидацией...")
+        model.optimize_hyperparameters(X_train_val_selected, y_train_val, kfold, n_trials=30)
 
-        # 12. Поиск оптимального порога
-        logger.info("Поиск оптимального порога...")
-        optimal_threshold = model.find_optimal_threshold(X_val_selected, y_val)
+        # 12. Поиск оптимального порога с кросс-валидацией
+        logger.info("Поиск оптимального порога с кросс-валидацией...")
+        optimal_threshold = model.find_optimal_threshold(X_train_val_selected, y_train_val, kfold)
 
         # Логирование информации о пороге
         mlflow.log_param("optimal_threshold", optimal_threshold)
@@ -172,16 +184,17 @@ def train_tokenizator_model(data_file: str, output_dir: str, threshold: float = 
         visualize_calibration_curve(y_test, test_metrics['y_pred_proba'],
                                     output_path=os.path.join(output_dir, 'calibration_curve.png'))
 
-        # 20. Визуализация кривой обучения
+        # 20. Визуализация кривой обучения (не требует изменений)
         logger.info("Визуализация кривой обучения...")
-
         lgb_model = lightgbm.LGBMClassifier(
             random_state=random_state,
             feature_name='auto'
         )
+        # Используем произвольный фолд для визуализации кривой обучения
+        train_idx, val_idx = next(kfold.split(X_train_val_selected, y_train_val))
         visualize_learning_curve(
             lgb_model,
-            X_train_selected, y_train,
+            X_train_val_selected.iloc[train_idx], y_train_val.iloc[train_idx],
             output_path=os.path.join(output_dir, 'learning_curve.png')
         )
 
@@ -229,6 +242,8 @@ if __name__ == "__main__":
     parser.add_argument('--threshold', type=float, default=DEFAULT_THRESHOLD, help='Порог для бинаризации')
     parser.add_argument('--random_state', type=int, default=DEFAULT_RANDOM_STATE,
                         help='Seed для генератора случайных чисел')
+    parser.add_argument('--n_splits', type=int, default=5, help='Количество фолдов для кросс-валидации')
+    parser.add_argument('--test_size', type=float, default=0.2, help='Размер тестовой выборки (0-1)')
 
     args = parser.parse_args()
 
@@ -241,7 +256,13 @@ if __name__ == "__main__":
 
         # Запуск основного конвейера
         trained_model, X_test, y_test = train_tokenizator_model(
-            args.data, args.output, args.threshold, args.random_state)
+            args.data,
+            args.output,
+            args.threshold,
+            args.random_state,
+            args.n_splits,
+            args.test_size
+        )
 
         # Вывод сводки
         logger.info("Конвейер модели успешно завершен")

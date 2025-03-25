@@ -13,7 +13,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from .preprocessing import preprocess_data
 from .feature_selection import analyze_correlations, group_features, select_features_from_model
-from .model_training import train_model, find_optimal_threshold, predict
+from .model_training import train_model, find_optimal_threshold, predict, split_data
 from .hyperparameter_tuning import optimize_hyperparameters
 from .evaluation import evaluate_model, compute_lift
 
@@ -39,6 +39,7 @@ class TokenizatorModel:
         selected_features (List[str]): Выбранные признаки
         feature_groups (Dict[str, List[str]]): Группы признаков
         model_metrics (Dict): Метрики модели
+        fold_results (Dict): Результаты по фолдам кросс-валидации
     """
 
     def __init__(self, random_state: int = 42):
@@ -57,9 +58,12 @@ class TokenizatorModel:
         self.selected_features = None
         self.feature_groups = None
         self.model_metrics = {}
+        self.fold_results = {}
 
-    def preprocess_data(self, X: pd.DataFrame, y: Optional[pd.Series] = None,
-                        threshold: float = 100) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.Series]]:
+    def preprocess_data(
+            self, X: pd.DataFrame,
+            y: Optional[pd.Series] = None,
+            threshold: float = 100) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.Series]]:
         """
         Предобработка данных путем масштабирования и опционально бинаризации
 
@@ -100,22 +104,28 @@ class TokenizatorModel:
 
         return X_reduced, to_drop
 
-    def select_features(self, X: pd.DataFrame, y: pd.Series, k: int = 100) -> Tuple[pd.DataFrame, List[str]]:
+    def select_features(
+            self,
+            X_train_val: pd.DataFrame,
+            y_train_val: pd.Series,
+            kfold,
+            k: int = 100) -> Tuple[pd.DataFrame, List[str]]:
         """
-        Выбор топ-k признаков с использованием SelectFromModel
+        Выбор топ-k признаков с использованием кросс-валидации
 
         Args:
-            X: DataFrame с признаками
-            y: Серия целевых значений
+            X_train_val: DataFrame с признаками обучающей+валидационной выборки
+            y_train_val: Серия целевых значений обучающей+валидационной выборки
+            kfold: Объект кросс-валидации
             k: Количество признаков для выбора
 
         Returns:
             Tuple[pd.DataFrame, List[str]]: DataFrame с выбранными признаками и список выбранных признаков
         """
-        logger.info(f"Выбор топ-{k} признаков с использованием SelectFromModel")
+        logger.info(f"Выбор топ-{k} признаков с использованием кросс-валидации")
 
-        # Вызов функции выбора признаков
-        X_selected, selected_features = select_features_from_model(X, y, random_state=self.random_state, k=k)
+        X_selected, selected_features = select_features_from_model(
+            X_train_val, y_train_val, kfold, random_state=self.random_state, k=k)
 
         # Сохранение выбранных признаков
         self.selected_features = selected_features
@@ -139,21 +149,23 @@ class TokenizatorModel:
 
         return self.feature_groups
 
-    def incremental_feature_evaluation(self, X_train: pd.DataFrame, y_train: pd.Series,
-                                       X_val: pd.DataFrame, y_val: pd.Series) -> Dict:
+    def incremental_feature_evaluation(
+            self,
+            X_train_val: pd.DataFrame,
+            y_train_val: pd.Series,
+            kfold) -> Dict:
         """
-        Инкрементальная оценка групп признаков для измерения их вклада
+        Инкрементальная оценка групп признаков для измерения их вклада с использованием кросс-валидации
 
         Args:
-            X_train: DataFrame с признаками обучающей выборки
-            y_train: Серия целевых значений обучающей выборки
-            X_val: DataFrame с признаками валидационной выборки
-            y_val: Серия целевых значений валидационной выборки
+            X_train_val: DataFrame с признаками обучающей+валидационной выборки
+            y_train_val: Серия целевых значений обучающей+валидационной выборки
+            kfold: Объект кросс-валидации
 
         Returns:
             Dict: Словарь с результатами инкрементальной оценки
         """
-        logger.info("Инкрементальная оценка групп признаков")
+        logger.info("Инкрементальная оценка групп признаков с кросс-валидацией")
 
         if not self.feature_groups:
             logger.error("Группы признаков не определены. Сначала вызовите group_features.")
@@ -192,24 +204,47 @@ class TokenizatorModel:
                 current_columns.extend(self.feature_groups[group])
 
                 # Создание текущего набора признаков
-                X_train_current = X_train[current_columns]
-                X_val_current = X_val[current_columns]
+                X_current = X_train_val[current_columns]
 
-                # Обучение и оценка
-                model = lgb.LGBMClassifier(**base_model.get_params())
-                model.fit(X_train_current, y_train)
+                # Инициализация массивов для хранения метрик по фолдам
+                fold_metrics = {
+                    'accuracy': [],
+                    'precision': [],
+                    'recall': [],
+                    'f1': [],
+                    'roc_auc': []
+                }
 
-                # Получение предсказаний
-                y_pred = model.predict(X_val_current)
-                y_pred_proba = model.predict_proba(X_val_current)[:, 1]
+                # Обучение и оценка на каждом фолде
+                for fold_idx, (train_idx, val_idx) in enumerate(kfold.split(X_train_val, y_train_val)):
+                    # Разделение данных для текущего фолда
+                    X_train_fold = X_current.iloc[train_idx]
+                    y_train_fold = y_train_val.iloc[train_idx]
+                    X_val_fold = X_current.iloc[val_idx]
+                    y_val_fold = y_train_val.iloc[val_idx]
 
-                # Расчет метрик
+                    # Обучение модели
+                    model = lgb.LGBMClassifier(**base_model.get_params())
+                    model.fit(X_train_fold, y_train_fold)
+
+                    # Получение предсказаний
+                    y_pred = model.predict(X_val_fold)
+                    y_pred_proba = model.predict_proba(X_val_fold)[:, 1]
+
+                    # Расчет метрик для текущего фолда
+                    fold_metrics['accuracy'].append(accuracy_score(y_val_fold, y_pred))
+                    fold_metrics['precision'].append(precision_score(y_val_fold, y_pred))
+                    fold_metrics['recall'].append(recall_score(y_val_fold, y_pred))
+                    fold_metrics['f1'].append(f1_score(y_val_fold, y_pred))
+                    fold_metrics['roc_auc'].append(roc_auc_score(y_val_fold, y_pred_proba))
+
+                # Расчет средних метрик по всем фолдам
                 results[group] = {
-                    'accuracy': accuracy_score(y_val, y_pred),
-                    'precision': precision_score(y_val, y_pred),
-                    'recall': recall_score(y_val, y_pred),
-                    'f1': f1_score(y_val, y_pred),
-                    'roc_auc': roc_auc_score(y_val, y_pred_proba),
+                    'accuracy': np.mean(fold_metrics['accuracy']),
+                    'precision': np.mean(fold_metrics['precision']),
+                    'recall': np.mean(fold_metrics['recall']),
+                    'f1': np.mean(fold_metrics['f1']),
+                    'roc_auc': np.mean(fold_metrics['roc_auc']),
                     'features_count': len(current_columns)
                 }
 
@@ -218,100 +253,101 @@ class TokenizatorModel:
 
         return results
 
-    def split_data(self, X: pd.DataFrame, y: pd.Series, test_size: float = 0.2,
-                   val_size: float = 0.25) -> Tuple:
+    def split_data(
+            self, X: pd.DataFrame,
+            y: pd.Series,
+            n_splits: int = 5,
+            test_size: float = 0.2) -> Tuple:
         """
-        Разделение данных на обучающую, валидационную и тестовую выборки
+        Разделение данных на тестовую выборку и кроссвалидационные разбиения
+        обучающей+валидационной выборки
 
         Args:
             X: DataFrame с признаками
             y: Серия целевых значений
+            n_splits: Количество фолдов для кросс-валидации
             test_size: Размер тестовой выборки (0-1)
-            val_size: Размер валидационной выборки от оставшихся данных (0-1)
 
         Returns:
-            Tuple: X_train, X_val, X_test, y_train, y_val, y_test
+            Tuple: X_train_val, X_test, y_train_val, y_test, kfold (StratifiedKFold object)
         """
-        from .model_training import split_data
 
-        logger.info("Разделение данных на обучающую, валидационную и тестовую выборки")
+        logger.info(f"Разделение данных на тестовую выборку и {n_splits}-фолдовую кросс-валидацию")
 
-        return split_data(X, y, test_size, val_size, self.random_state)
+        return split_data(X, y, n_splits, test_size, self.random_state)
 
-    def train(self, X_train: pd.DataFrame, y_train: pd.Series,
-              X_val: pd.DataFrame, y_val: pd.Series,
-              params: Optional[Dict] = None) -> lgb.Booster:
+    def train(self, X_train_val: pd.DataFrame, y_train_val: pd.Series,
+              kfold, params: Optional[Dict] = None) -> Dict:
         """
-        Обучение модели LightGBM
+        Обучение модели LightGBM с использованием кросс-валидации
 
         Args:
-            X_train: DataFrame с признаками обучающей выборки
-            y_train: Серия целевых значений обучающей выборки
-            X_val: DataFrame с признаками валидационной выборки
-            y_val: Серия целевых значений валидационной выборки
-            params: Параметры модели
+            X_train_val: DataFrame с признаками обучающей и валидационной выборки
+            y_train_val: Серия целевых значений обучающей и валидационной выборки
+            kfold: Объект кросс-валидации
+            params: Параметры модели LightGBM
 
         Returns:
-            lgb.Booster: Обученная модель
+            Dict: Результаты кросс-валидации
         """
-        logger.info("Обучение модели LightGBM")
+        logger.info("Обучение модели LightGBM с кросс-валидацией")
 
         # Сохранение имен признаков
-        self.feature_names = X_train.columns.tolist()
+        self.feature_names = X_train_val.columns.tolist()
 
-        # Вызов функции обучения модели
-        self.model, self.feature_importance = train_model(
-            X_train, y_train, X_val, y_val, params, self.feature_names)
+        self.model, self.feature_importance, self.fold_results = train_model(
+            X_train_val, y_train_val, kfold, params, self.feature_names)
 
         logger.info(f"Модель обучена с {len(self.feature_names)} признаками")
 
-        return self.model
+        return self.fold_results
 
-    def optimize_hyperparameters(self, X_train: pd.DataFrame, y_train: pd.Series,
-                                 X_val: pd.DataFrame, y_val: pd.Series,
-                                 n_trials: int = 50) -> lgb.Booster:
+    def optimize_hyperparameters(self, X_train_val: pd.DataFrame, y_train_val: pd.Series,
+                                            kfold, n_trials: int = 50) -> Dict:
         """
-        Оптимизация гиперпараметров с использованием Optuna
+        Оптимизация гиперпараметров с использованием Optuna и кросс-валидации
 
         Args:
-            X_train: DataFrame с признаками обучающей выборки
-            y_train: Серия целевых значений обучающей выборки
-            X_val: DataFrame с признаками валидационной выборки
-            y_val: Серия целевых значений валидационной выборки
+            X_train_val: DataFrame с признаками обучающей+валидационной выборки
+            y_train_val: Серия целевых значений обучающей+валидационной выборки
+            kfold: Объект кросс-валидации
             n_trials: Количество испытаний для оптимизации
 
         Returns:
-            lgb.Booster: Модель, обученная с оптимальными гиперпараметрами
+            Dict: Лучшие гиперпараметры
         """
-        logger.info(f"Оптимизация гиперпараметров с {n_trials} испытаниями")
+        logger.info(f"Оптимизация гиперпараметров с {n_trials} испытаниями и кросс-валидацией")
 
-        # Вызов функции оптимизации гиперпараметров
         best_params = optimize_hyperparameters(
-            X_train, y_train, X_val, y_val, n_trials, self.random_state)
+            X_train_val, y_train_val, kfold, n_trials, self.random_state)
 
         # Обучение модели с лучшими параметрами
-        return self.train(X_train, y_train, X_val, y_val, best_params)
+        return self.train(X_train_val, y_train_val, kfold, best_params)
 
-    def find_optimal_threshold(self, X_val: pd.DataFrame, y_val: pd.Series) -> float:
+    def find_optimal_threshold(
+            self,
+            X_train_val: pd.DataFrame,
+            y_train_val: pd.Series,
+            kfold) -> float:
         """
-        Поиск оптимального порога классификации
+        Поиск оптимального порога классификации с использованием кросс-валидации
 
         Args:
-            X_val: DataFrame с признаками валидационной выборки
-            y_val: Серия целевых значений валидационной выборки
+            X_train_val: DataFrame с признаками обучающей+валидационной выборки
+            y_train_val: Серия целевых значений обучающей+валидационной выборки
+            kfold: Объект кросс-валидации
 
         Returns:
             float: Оптимальный порог
         """
-        logger.info("Поиск оптимального порога классификации")
+        logger.info("Поиск оптимального порога классификации с кросс-валидацией")
 
         # Проверка наличия модели
         if not self.model:
             logger.error("Модель еще не обучена")
             return self.best_threshold
 
-        # Вызов функции поиска оптимального порога
-        self.best_threshold = find_optimal_threshold(self.model, X_val, y_val)
+        self.best_threshold = find_optimal_threshold(self.model, X_train_val, y_train_val, kfold)
 
         return self.best_threshold
 

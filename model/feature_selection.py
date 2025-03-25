@@ -6,7 +6,6 @@ import re
 import logging
 from typing import Tuple, List, Dict
 import lightgbm as lgb
-from sklearn.feature_selection import RFE, SelectFromModel
 
 logger = logging.getLogger(__name__)
 
@@ -41,62 +40,20 @@ def analyze_correlations(X: pd.DataFrame, threshold: float = 0.9) -> Tuple[pd.Da
     return X_reduced, to_drop
 
 
-def select_features_rfe(X: pd.DataFrame, y: pd.Series, k: int = 100,
-                        random_state: int = 42) -> Tuple[pd.DataFrame, List[str]]:
+def select_features_from_model(
+        X_train_val: pd.DataFrame,
+        y_train_val: pd.Series,
+        kfold,
+        random_state: int = 42,
+        threshold: str = 'mean',
+        k: int = 100) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Выбор признаков с использованием Recursive Feature Elimination
+    Выбор признаков с использованием кросс-валидации
 
     Args:
-        X: DataFrame с признаками
-        y: Серия целевых значений
-        k: Количество признаков для выбора
-        random_state: Seed для генератора случайных чисел
-
-    Returns:
-        Tuple[pd.DataFrame, List[str]]: DataFrame с выбранными признаками и список выбранных признаков
-    """
-    logger.info(f"Выбор топ-{k} признаков с использованием RFE")
-
-    # Инициализация классификатора LightGBM
-    estimator = lgb.LGBMClassifier(
-        objective='binary',
-        boosting_type='gbdt',
-        n_estimators=100,
-        random_state=random_state
-    )
-
-    # Инициализация RFE
-    selector = RFE(
-        estimator=estimator,
-        n_features_to_select=k,
-        step=10,
-        verbose=1
-    )
-
-    # Обучение селектора
-    selector.fit(X, y)
-
-    # Получение выбранных признаков
-    selected_features = X.columns[selector.support_].tolist()
-
-    logger.info(f"Выбрано {len(selected_features)} признаков")
-
-    # Создание новой матрицы признаков с выбранными признаками
-    X_selected = X[selected_features]
-
-    return X_selected, selected_features
-
-
-def select_features_from_model(X: pd.DataFrame, y: pd.Series,
-                               random_state: int = 42,
-                               threshold: str = 'mean',
-                               k: int = 100) -> Tuple[pd.DataFrame, List[str]]:
-    """
-    Выбор признаков с использованием SelectFromModel и LightGBM
-
-    Args:
-        X: DataFrame с признаками
-        y: Серия целевых значений
+        X_train_val: DataFrame с признаками обучающей+валидационной выборки
+        y_train_val: Серия целевых значений обучающей+валидационной выборки
+        kfold: Объект кросс-валидации
         random_state: Seed для генератора случайных чисел
         threshold: Порог для отбора признаков ('mean', 'median', или числовое значение)
         k: Максимальное количество признаков для выбора
@@ -104,40 +61,48 @@ def select_features_from_model(X: pd.DataFrame, y: pd.Series,
     Returns:
         Tuple[pd.DataFrame, List[str]]: DataFrame с выбранными признаками и список выбранных признаков
     """
+    logger.info(f"Выбор признаков с использованием кросс-валидации (threshold={threshold}, max_k={k})")
 
-    logger.info(f"Выбор признаков с использованием SelectFromModel (threshold={threshold}, max_k={k})")
+    # Инициализация словаря для хранения важности признаков по фолдам
+    feature_importance_dict = {feature: 0.0 for feature in X_train_val.columns}
 
-    # Инициализация классификатора LightGBM
-    estimator = lgb.LGBMClassifier(
-        objective='binary',
-        boosting_type='gbdt',
-        n_estimators=100,
-        importance_type='gain',
-        random_state=random_state,
-        verbose=-1
-    )
+    # Обучение моделей на каждом фолде для определения важности признаков
+    for fold_idx, (train_idx, val_idx) in enumerate(kfold.split(X_train_val, y_train_val)):
+        logger.info(f"Определение важности признаков на фолде {fold_idx + 1}")
 
-    # Обучение базовой модели на всех признаках
-    estimator.fit(X, y)
+        # Разделение данных для текущего фолда
+        X_train_fold = X_train_val.iloc[train_idx]
+        y_train_fold = y_train_val.iloc[train_idx]
 
-    # Инициализация селектора признаков
-    selector = SelectFromModel(
-        estimator=estimator,
-        threshold=threshold,
-        prefit=True,
-        max_features=k
-    )
+        # Инициализация и обучение модели для определения важности признаков
+        estimator = lgb.LGBMClassifier(
+            objective='binary',
+            boosting_type='gbdt',
+            n_estimators=100,
+            importance_type='gain',
+            random_state=random_state,
+            verbose=-1
+        )
 
-    # Получение маски выбранных признаков
-    feature_mask = selector.get_support()
+        estimator.fit(X_train_fold, y_train_fold)
 
-    # Получение выбранных признаков
-    selected_features = X.columns[feature_mask].tolist()
+        # Обновление словаря важности признаков
+        for feature, importance in zip(X_train_val.columns, estimator.feature_importances_):
+            feature_importance_dict[feature] += importance / kfold.n_splits
+
+    # Создание DataFrame с важностью признаков
+    feature_importance = pd.DataFrame({
+        'feature': list(feature_importance_dict.keys()),
+        'importance': list(feature_importance_dict.values())
+    }).sort_values('importance', ascending=False)
+
+    # Выбор топ-k признаков
+    selected_features = feature_importance.head(k)['feature'].tolist()
 
     logger.info(f"Выбрано {len(selected_features)} признаков")
 
     # Создание новой матрицы признаков с выбранными признаками
-    X_selected = X[selected_features]
+    X_selected = X_train_val[selected_features]
 
     return X_selected, selected_features
 
