@@ -4,9 +4,9 @@ import numpy as np
 import pandas as pd
 import logging
 import lightgbm as lgb
-import optuna
 from sklearn.metrics import f1_score
-from typing import Dict, Callable
+from typing import Callable
+
 
 logger = logging.getLogger(__name__)
 
@@ -100,50 +100,3 @@ def objective_factory(
         return np.mean(f1_scores)
 
     return objective
-
-
-def optimize_hyperparameters(
-        X_train_val: pd.DataFrame,
-        y_train_val: pd.Series,
-        kfold,
-        n_trials: int = 50,
-        random_state: int = 42) -> Dict:
-    """
-    Оптимизация гиперпараметров с использованием Optuna и кросс-валидации
-
-    Args:
-        X_train_val: DataFrame с признаками обучающей+валидационной выборки
-        y_train_val: Серия целевых значений обучающей+валидационной выборки
-        kfold: Объект кросс-валидации
-        n_trials: Количество испытаний для оптимизации
-        random_state: Seed для генератора случайных чисел
-
-    Returns:
-        Dict: Лучшие гиперпараметры
-    """
-    logger.info(f"Оптимизация гиперпараметров с {n_trials} испытаниями и кросс-валидацией")
-
-    # Создание функции цели для Optuna
-    objective = objective_factory(X_train_val, y_train_val, kfold, random_state)
-
-    # Создание и запуск исследования с параллельной обработкой
-    study = optuna.create_study(direction='maximize')
-    study.optimize(objective, n_trials=n_trials, n_jobs=-1)
-
-    # Получение лучших параметров
-    best_params = study.best_params
-    best_params['objective'] = 'binary'
-    best_params['metric'] = 'binary_logloss'
-    best_params['boosting_type'] = 'gbdt'
-    best_params['random_state'] = random_state
-    # GPU настройки
-    best_params['device'] = 'gpu'
-    best_params['gpu_platform_id'] = 0
-    best_params['gpu_device_id'] = 0
-    best_params['gpu_use_dp'] = False
-    best_params['max_bin'] = 63
-
-    logger.info(f"Лучшие гиперпараметры: {best_params}")
-    logger.info(f"Лучший средний F1 score: {study.best_value:.4f}")
-
-    return best_params

@@ -113,105 +113,82 @@ def train_tokenizator_model(
         X_train_val_balanced, y_train_val_balanced, _ = model.handle_class_imbalance(
             X_train_val, y_train_val, method=best_imbalance_method)
 
-        # 11. Сохранение параметров для модели
-        balance_params = {}
-        if 'class_weight' in imbalance_params:
-            balance_params['class_weight'] = imbalance_params['class_weight']
+        # 11. Совместная оптимизация гиперпараметров и отбора признаков
+        logger.info("Запуск совместной оптимизации гиперпараметров и отбора признаков...")
+        best_params, selected_features = model.optimize_jointly(
+            X_train_val_balanced, y_train_val_balanced,
+            cv_outer=3, cv_inner=5, n_trials=30
+        )
 
-        # 12. Оптимизация гиперпараметров
-        logger.info("Оптимизация гиперпараметров с кросс-валидацией...")
-        best_params = model.optimize_hyperparameters(X_train_val_balanced, y_train_val_balanced, kfold, n_trials=30)
-
-        # Добавляем параметры для обработки дисбаланса, если необходимо
-        if 'class_weight' in imbalance_params:
-            best_params['class_weight'] = imbalance_params['class_weight']
-
-        # 13. Инкрементальная оценка групп признаков
-        logger.info("Инкрементальная оценка групп признаков...")
-        incremental_results = model.incremental_feature_evaluation(
-            X_train_val_balanced, y_train_val_balanced, kfold)
-
-        # 14. Применение результатов инкрементальной оценки
-        logger.info("Применение результатов инкрементальной оценки...")
-        X_train_val_filtered = model.apply_incremental_evaluation_results(
-            X_train_val_balanced, min_contribution=0.001)
+        # 12. Отбор признаков с оптимальными параметрами
+        logger.info("Отбор признаков с использованием оптимальных параметров...")
+        X_train_val_selected, selected_features = model.select_features_with_optimal_parameters(
+            X_train_val_balanced, y_train_val_balanced,
+            params=best_params, trial_budget=50
+        )
 
         # Обновляем тестовый набор с учетом выбранных признаков
-        X_test_filtered = X_test[model.selected_features]
+        X_test_selected = X_test[selected_features]
 
-        # 15. Оптимизация порядка групп признаков
-        logger.info("Оптимизация порядка групп признаков...")
-        optimal_group_order = model.optimize_feature_groups_order(
-            X_train_val_filtered, y_train_val_balanced, kfold)
+        # 13. Обучение модели с выбранными признаками и оптимальными гиперпараметрами
+        logger.info("Обучение модели с выбранными признаками и оптимальными гиперпараметрами...")
+        model.train(
+            X_train_val_selected, y_train_val_balanced, kfold,
+            params=best_params, threshold=model.best_threshold
+        )
 
-        # 16. Окончательный выбор признаков с учетом оптимального порядка групп
-        logger.info("Финальный выбор признаков с оптимизированным порядком групп...")
-        X_train_val_selected, selected_features = model.select_features_with_optimal_groups(
-            X_train_val_filtered, y_train_val_balanced, kfold, optimal_group_order, k=100)
-        X_test_selected = X_test_filtered[selected_features]
-
-        # 17. Поиск оптимального порога с оптимизированными параметрами и признаками
-        logger.info("Поиск оптимального порога с кросс-валидацией...")
-        optimal_threshold = model.find_optimal_threshold(
-            X_train_val_selected, y_train_val_balanced, kfold, params=best_params)
-
-        # 18. Обучение модели с выбранными признаками, оптимальными гиперпараметрами и порогом
-        logger.info("Обучение финальной модели с кросс-валидацией...")
-        fold_results = model.train(
-            X_train_val_selected, y_train_val_balanced, kfold, params=best_params, threshold=optimal_threshold)
-
-        # 19. Анализ стабильности результатов между фолдами
+        # 14. Анализ стабильности результатов между фолдами
         logger.info("Анализ стабильности результатов между фолдами...")
         stability_metrics = model.analyze_fold_stability()
 
-        # 20. Переобучение финальной модели на всех данных
-        logger.info("Переобучение финальной модели на всех данных...")
+        # 15. Переобучение финальной модели на тренировочных и валидационных данных
+        logger.info("Переобучение финальной модели на тренировочных и валидационных данных...")
         model.train_final_model(
-            pd.concat([X_train_val_selected, X_test_selected]),
-            pd.concat([y_train_val_balanced, y_test]),
+            X_train_val_selected,
+            y_train_val_balanced,
             params=best_params
         )
 
-        # 21. Оценка модели на тестовой выборке
+        # 16. Оценка модели на тестовой выборке
         logger.info("Оценка модели на тестовой выборке...")
-        test_metrics = model.evaluate(X_test_selected, y_test, threshold=optimal_threshold)
+        test_metrics = model.evaluate(X_test_selected, y_test, threshold=model.best_threshold)
 
         # Логирование метрик
         for metric_name, metric_value in test_metrics.items():
             if isinstance(metric_value, (int, float)):
                 mlflow.log_metric(metric_name, metric_value)
 
-        # 22. Расчет и визуализация лифта
+        # 17. Расчет и визуализация лифта
         logger.info("Расчет и визуализация лифта...")
         bin_metrics = model.compute_lift(X_test_selected, y_test, bins=10)
         visualize_lift(bin_metrics, output_path=os.path.join(output_dir, 'lift_charts.png'))
 
-        # 23. Визуализация важности признаков
+        # 18. Визуализация важности признаков
         logger.info("Визуализация важности признаков...")
         visualize_feature_importance(model.feature_importance, top_n=30,
                                      output_path=os.path.join(output_dir, 'feature_importance.png'))
 
-        # 24. Визуализация матрицы ошибок
+        # 19. Визуализация матрицы ошибок
         logger.info("Визуализация матрицы ошибок...")
         visualize_confusion_matrix(test_metrics['confusion_matrix'],
                                    output_path=os.path.join(output_dir, 'confusion_matrix.png'))
 
-        # 25. Визуализация ROC-кривой
+        # 20. Визуализация ROC-кривой
         logger.info("Визуализация ROC-кривой...")
         visualize_roc_curve(y_test, test_metrics['y_pred_proba'],
                             output_path=os.path.join(output_dir, 'roc_curve.png'))
 
-        # 26. Визуализация PR-кривой
+        # 21. Визуализация PR-кривой
         logger.info("Визуализация PR-кривой...")
         visualize_pr_curve(y_test, test_metrics['y_pred_proba'],
                            output_path=os.path.join(output_dir, 'pr_curve.png'))
 
-        # 27. Визуализация кривой калибровки
+        # 22. Визуализация кривой калибровки
         logger.info("Визуализация кривой калибровки...")
         visualize_calibration_curve(y_test, test_metrics['y_pred_proba'],
                                     output_path=os.path.join(output_dir, 'calibration_curve.png'))
 
-        # 28. Визуализация кривой обучения (не требует изменений)
+        # 23. Визуализация кривой обучения
         logger.info("Визуализация кривой обучения...")
         lgb_model = lightgbm.LGBMClassifier(
             random_state=random_state,
@@ -225,13 +202,13 @@ def train_tokenizator_model(
             output_path=os.path.join(output_dir, 'learning_curve.png')
         )
 
-        # 29. Визуализация значений SHAP
+        # 24. Визуализация значений SHAP
         logger.info("Визуализация значений SHAP...")
         visualize_shap_values(model.model, X_test_selected,
                               n_samples=min(100, len(X_test_selected)),
                               output_dir=output_dir)
 
-        # 30. Сохранение модели
+        # 25. Сохранение модели
         logger.info("Сохранение модели...")
         model_path = os.path.join(output_dir, 'tokenizator_model.txt')
         model.save_model(model_path)

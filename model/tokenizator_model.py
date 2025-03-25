@@ -1,16 +1,18 @@
 import os
 import numpy as np
+import optuna
 import pandas as pd
 import logging
 import lightgbm as lgb
 from typing import Tuple, List, Dict, Optional, Union
+
+from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import f1_score
 from .preprocessing import preprocess_data
-from .feature_selection import analyze_correlations, group_features, select_features_from_model
-from .model_training import train_model, find_optimal_threshold, predict, split_data
-from .hyperparameter_tuning import optimize_hyperparameters
+from .feature_selection import analyze_correlations, group_features
+from .model_training import train_model, predict, split_data
 from .evaluation import evaluate_model, compute_lift
 from imblearn.over_sampling import RandomOverSampler, SMOTE, ADASYN
 from imblearn.under_sampling import RandomUnderSampler
@@ -105,60 +107,197 @@ class TokenizatorModel:
 
         return X_reduced, to_drop
 
-    def select_features_with_optimal_groups(
+    def select_features_with_optimal_parameters(
             self,
             X_train_val: pd.DataFrame,
             y_train_val: pd.Series,
-            kfold,
-            optimal_group_order: List[str],
-            k: int = 100) -> Tuple[pd.DataFrame, List[str]]:
+            params: Dict = None,
+            group_weights: Dict[str, float] = None,
+            trial_budget: int = 100
+    ) -> Tuple[pd.DataFrame, List[str]]:
         """
-        Выбор признаков с использованием оптимизированного порядка групп
+        Выбор признаков с учетом оптимальных параметров и группового подхода.
 
         Args:
             X_train_val: DataFrame с признаками
             y_train_val: Серия целевых значений
-            kfold: Объект кросс-валидации
-            optimal_group_order: Оптимизированный порядок групп признаков
-            k: Максимальное количество признаков
+            params: Гиперпараметры LightGBM (используются при оценке признаков)
+            group_weights: Словарь весов для групп признаков (влияет на вероятность выбора)
+            trial_budget: Количество итераций поиска оптимальной комбинации
 
         Returns:
-            Tuple[pd.DataFrame, List[str]]: Выбранные признаки и их список
+            Tuple[pd.DataFrame, List[str]]: DataFrame с выбранными признаками и их список
         """
-        logger.info(f"Выбор признаков с оптимизированным порядком групп признаков, max_k={k}")
 
+        logger.info(f"Начало отбора признаков с учетом оптимальных параметров (бюджет: {trial_budget} итераций)")
+
+        # Если группы признаков не определены, группируем их
         if not self.feature_groups:
             self.feature_groups = self.group_features(X_train_val)
 
-        # Поочередно добавляем группы в приоритетном порядке
-        all_selected_features = []
+        # Если не переданы веса групп, используем равномерное распределение
+        if group_weights is None:
+            group_weights = {group: 1.0 for group in self.feature_groups.keys()}
 
-        for group_name in optimal_group_order:
-            if group_name not in self.feature_groups:
-                continue
+        # Если не переданы параметры, используем дефолтные
+        if params is None:
+            if hasattr(self, 'best_params') and self.best_params:
+                params = self.best_params
+            else:
+                params = {
+                    'objective': 'binary',
+                    'metric': 'binary_logloss',
+                    'boosting_type': 'gbdt',
+                    'num_leaves': 31,
+                    'learning_rate': 0.05,
+                    'random_state': self.random_state
+                }
 
-            # Добавляем признаки из текущей группы
-            group_features = self.feature_groups[group_name]
-            all_selected_features.extend(group_features)
+        # Функция для создания объекта исследования Optuna
+        def create_study():
+            study_optuna = optuna.create_study(
+                direction="maximize",
+                sampler=optuna.samplers.TPESampler(seed=self.random_state)
+            )
+            return study_optuna
 
-            # Если превысили лимит, обрезаем список
-            if len(all_selected_features) > k:
-                # Выбор наиболее важных признаков через кросс-валидацию
-                _, important_features = select_features_from_model(
-                    X_train_val[all_selected_features],
-                    y_train_val,
-                    kfold,
-                    random_state=self.random_state,
-                    k=k
+        # Создаем кросс-валидацию
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=self.random_state)
+
+        # Объект для оптимизации
+        study = create_study()
+
+        # Определение объективной функции для оптимизации
+        def objective(trial):
+            # 1. Для каждой группы признаков определяем, будет ли она использоваться
+            # С учетом весов групп (вероятность использования пропорциональна весу)
+            selected_groups = []
+            for group_name, weight in group_weights.items():
+                # Нормализуем вес к вероятности (от 0 до 1)
+                prob = min(1.0, max(0.1, weight / max(group_weights.values())))
+                use_group = trial.suggest_categorical(f"use_group_{group_name}",
+                                                      [True, False],
+                                                      [prob, 1.0 - prob])
+                if use_group:
+                    selected_groups.append(group_name)
+
+            # Если не выбрана ни одна группа, используем случайную
+            if not selected_groups and self.feature_groups:
+                group_probs = np.array(list(group_weights.values()))
+                group_probs = group_probs / group_probs.sum()
+                selected_groups = [np.random.choice(list(group_weights.keys()), p=group_probs)]
+
+            # 2. Сбор всех признаков из выбранных групп
+            candidate_features = []
+            for group in selected_groups:
+                candidate_features.extend(self.feature_groups[group])
+
+            # 3. Оптимизация подмножества признаков внутри каждой группы
+            selected_features = []
+            for group in selected_groups:
+                group_features = self.feature_groups[group]
+                # Определяем сколько признаков из группы использовать
+                feature_ratio = trial.suggest_float(f"feature_ratio_{group}", 0.3, 1.0)
+                n_features = max(1, int(len(group_features) * feature_ratio))
+
+                # Если признаков мало, используем все
+                if len(group_features) <= 5:
+                    selected_features.extend(group_features)
+                else:
+                    # Иначе выбираем подмножество признаков
+                    # Здесь мы используем случайное подмножество для скорости
+                    # В реальной системе можно использовать более сложные методы отбора
+                    selected_indices = np.random.choice(
+                        len(group_features),
+                        size=n_features,
+                        replace=False
+                    )
+                    selected_features.extend([group_features[i] for i in selected_indices])
+
+            # Если отобрано слишком много признаков, ограничиваем их число
+            max_features = min(200, len(selected_features))
+            if len(selected_features) > max_features:
+                selected_indices = np.random.choice(
+                    len(selected_features),
+                    size=max_features,
+                    replace=False
                 )
-                all_selected_features = important_features
+                selected_features = [selected_features[i] for i in selected_indices]
 
-        self.selected_features = all_selected_features
-        X_selected = X_train_val[all_selected_features]
+            # 4. Оценка полученного набора признаков с помощью кросс-валидации
+            try:
+                # Обучаем модель с выбранными признаками и оптимальными параметрами
+                model = lgb.LGBMClassifier(**params)
+                cv_scores = cross_val_score(
+                    model,
+                    X_train_val[selected_features],
+                    y_train_val,
+                    cv=cv,
+                    scoring='f1',
+                    n_jobs=-1
+                )
 
-        logger.info(f"Выбрано {len(all_selected_features)} признаков")
+                mean_score = np.mean(cv_scores)
 
-        return X_selected, all_selected_features
+                # Штраф за большое количество признаков для баланса между качеством и простотой
+                n_features_penalty = 1.0 - (0.0005 * len(selected_features))
+                score = mean_score * n_features_penalty
+
+                return score
+            except Exception as e:
+                logger.error(f"Ошибка при оценке признаков: {e}")
+                return 0.0
+
+        # Запуск оптимизации
+        study.optimize(objective, n_trials=trial_budget, n_jobs=-1)
+
+        # Получение лучших параметров
+        best_trial = study.best_trial
+
+        # Извлечение выбранных групп признаков
+        selected_groups = []
+        for group_name in self.feature_groups.keys():
+            if best_trial.params.get(f"use_group_{group_name}", False):
+                selected_groups.append(group_name)
+
+        # Если не выбрана ни одна группа, используем все группы
+        if not selected_groups and self.feature_groups:
+            selected_groups = list(self.feature_groups.keys())
+
+        # Составление итогового списка признаков
+        final_features = []
+        for group in selected_groups:
+            group_features = self.feature_groups[group]
+            # Определяем сколько признаков из группы использовать
+            feature_ratio = best_trial.params.get(f"feature_ratio_{group}", 1.0)
+            n_features = max(1, int(len(group_features) * feature_ratio))
+
+            if len(group_features) <= 5 or feature_ratio >= 0.95:
+                # Если признаков мало или выбрана почти вся группа, используем все признаки
+                final_features.extend(group_features)
+            else:
+                # Иначе выбираем топ-N признаков по важности
+                # Обучаем модель на всех признаках группы
+                temp_model = lgb.LGBMClassifier(**params)
+                temp_model.fit(X_train_val[group_features], y_train_val)
+
+                # Получаем важность признаков
+                importance = pd.DataFrame({
+                    'feature': group_features,
+                    'importance': temp_model.feature_importances_
+                }).sort_values('importance', ascending=False)
+
+                # Выбираем топ-N признаков
+                top_features = importance.head(n_features)['feature'].tolist()
+                final_features.extend(top_features)
+
+        logger.info(f"Отбор признаков завершен. Выбрано {len(final_features)} признаков "
+                    f"из {len(selected_groups)} групп.")
+
+        # Сохраняем выбранные признаки
+        self.selected_features = final_features
+
+        return X_train_val[final_features], final_features
 
     def group_features(self, X: pd.DataFrame) -> Dict[str, List[str]]:
         """
@@ -177,169 +316,6 @@ class TokenizatorModel:
 
         return self.feature_groups
 
-    def incremental_feature_evaluation(
-            self,
-            X_train_val: pd.DataFrame,
-            y_train_val: pd.Series,
-            kfold) -> Dict:
-        """
-        Инкрементальная оценка групп признаков для измерения их вклада
-        """
-        logger.info("Инкрементальная оценка групп признаков с кросс-валидацией")
-
-        if not self.feature_groups:
-            logger.error("Группы признаков не определены. Сначала вызовите group_features.")
-            return None
-
-        # Определение базовой модели для оценки
-        base_model = lgb.LGBMClassifier(
-            objective='binary',
-            metric='binary_logloss',
-            boosting_type='gbdt',
-            num_leaves=31,
-            learning_rate=0.05,
-            random_state=self.random_state,
-            n_estimators=100,
-            device='gpu',
-            gpu_platform_id=0,
-            gpu_device_id=0,
-            gpu_use_dp=False,
-            max_bin=63,
-            verbose=-1,
-        )
-
-        # Оценка вклада каждой группы
-        results = {}
-        current_columns = []
-        group_contributions = {}
-
-        # Обработка групп признаков в определенном порядке
-        ordered_groups = [
-            'text_metrics', 'bertweet', 'informal_slang',
-            'structural', 'temporal', 'clip', 'emotional', 'other'
-        ]
-
-        # Фильтрация только существующих групп
-        ordered_groups = [g for g in ordered_groups if g in self.feature_groups]
-
-        # Инкрементальная оценка каждой группы
-        baseline_f1 = 0
-
-        for group in ordered_groups:
-            # Добавление признаков текущей группы
-            current_columns.extend(self.feature_groups[group])
-
-            # Создание текущего набора признаков
-            X_current = X_train_val[current_columns]
-
-            # Инициализация массивов для хранения метрик по фолдам
-            fold_metrics = {
-                'accuracy': [],
-                'precision': [],
-                'recall': [],
-                'f1': []
-            }
-
-            # Обучение и оценка на каждом фолде
-            for train_idx, val_idx in kfold.split(X_train_val, y_train_val):
-                # Разделение данных для текущего фолда
-                X_train_fold = X_current.iloc[train_idx]
-                y_train_fold = y_train_val.iloc[train_idx]
-                X_val_fold = X_current.iloc[val_idx]
-                y_val_fold = y_train_val.iloc[val_idx]
-
-                # Обучение модели
-                model = lgb.LGBMClassifier(**base_model.get_params())
-                model.fit(X_train_fold, y_train_fold)
-
-                # Получение предсказаний
-                y_pred = model.predict(X_val_fold)
-                y_pred_proba = model.predict_proba(X_val_fold)[:, 1]
-
-                # Расчет метрик для текущего фолда
-                fold_metrics['accuracy'].append(accuracy_score(y_val_fold, y_pred))
-                fold_metrics['precision'].append(precision_score(y_val_fold, y_pred))
-                fold_metrics['recall'].append(recall_score(y_val_fold, y_pred))
-                fold_metrics['f1'].append(f1_score(y_val_fold, y_pred))
-
-            # Расчет средних метрик по всем фолдам
-            current_f1 = np.mean(fold_metrics['f1'])
-
-            # Расчет вклада этой группы (прирост F1)
-            contribution = current_f1 - baseline_f1
-            group_contributions[group] = contribution
-            baseline_f1 = current_f1
-
-            results[group] = {
-                'accuracy': np.mean(fold_metrics['accuracy']),
-                'precision': np.mean(fold_metrics['precision']),
-                'recall': np.mean(fold_metrics['recall']),
-                'f1': current_f1,
-                'features_count': len(current_columns),
-                'contribution': contribution
-            }
-
-            logger.info(f"Добавлена группа '{group}': F1 = {current_f1:.4f}, "
-                        f"Вклад = {contribution:.4f}, "
-                        f"Всего признаков = {len(current_columns)}")
-
-        # Сортировка групп по вкладу
-        sorted_groups = sorted(group_contributions.items(), key=lambda x: x[1], reverse=True)
-        logger.info("Группы признаков по вкладу в метрику F1:")
-        for group, contrib in sorted_groups:
-            logger.info(f"  {group}: {contrib:.4f}")
-
-        # Сохраняем результаты и отсортированный порядок групп
-        self.incremental_results = results
-        self.sorted_group_order = [g for g, _ in sorted_groups]
-
-        return results
-
-    def apply_incremental_evaluation_results(
-            self,
-            X_train_val: pd.DataFrame,
-            min_contribution: float = 0.001) -> pd.DataFrame:
-        """
-        Применение результатов инкрементальной оценки для выбора признаков
-
-        Args:
-            X_train_val: DataFrame с признаками
-            min_contribution: Минимальный вклад группы для включения
-
-        Returns:
-            pd.DataFrame: DataFrame с выбранными признаками
-        """
-        if not hasattr(self, 'incremental_results') or not self.incremental_results:
-            logger.error(
-                "Отсутствуют результаты инкрементальной оценки. Сначала выполните incremental_feature_evaluation.")
-            return X_train_val
-
-        if not hasattr(self, 'sorted_group_order') or not self.sorted_group_order:
-            logger.error("Отсутствует отсортированный порядок групп. Сначала выполните incremental_feature_evaluation.")
-            return X_train_val
-
-        # Выбор групп с вкладом выше порога
-        significant_groups = []
-        for group in self.sorted_group_order:
-            contribution = self.incremental_results[group]['contribution']
-            if contribution >= min_contribution:
-                significant_groups.append(group)
-                logger.info(f"Группа '{group}' включена (вклад: {contribution:.4f})")
-            else:
-                logger.info(f"Группа '{group}' исключена (вклад: {contribution:.4f} < {min_contribution})")
-
-        # Сбор признаков из выбранных групп
-        selected_features = []
-        for group in significant_groups:
-            selected_features.extend(self.feature_groups[group])
-
-        logger.info(f"На основе инкрементальной оценки выбрано {len(selected_features)} признаков")
-        self.selected_features = selected_features
-
-        # Обновляем feature_groups, удаляя исключенные группы
-        self.feature_groups = {group: self.feature_groups[group] for group in significant_groups}
-
-        return X_train_val[selected_features]
 
     def split_data(
             self,
@@ -398,16 +374,20 @@ class TokenizatorModel:
 
         return self.fold_results
 
-    def train_final_model(self, X_all: pd.DataFrame, y_all: pd.Series, params: Optional[Dict] = None) -> None:
+    def train_final_model(
+            self,
+            X_train_val: pd.DataFrame,
+            y_train_val: pd.Series,
+            params: Optional[Dict] = None) -> None:
         """
-        Переобучение финальной модели на всех данных (тренировочных, валидационных, тестовых)
+        Переобучение финальной модели на тренировочных и валидационных данных.
 
         Args:
-            X_all: DataFrame со всеми признаками
-            y_all: Серия всех целевых значений
+            X_train_val: DataFrame с признаками обучающей и валидационной выборки
+            y_train_val: Серия целевых значений обучающей и валидационной выборки
             params: Параметры модели LightGBM
         """
-        logger.info("Переобучение финальной модели на всех данных")
+        logger.info("Переобучение финальной модели на тренировочных и валидационных данных")
 
         # Использование оптимальных параметров, если они были найдены
         if params is None:
@@ -432,10 +412,10 @@ class TokenizatorModel:
                 }
 
         # Сохранение имен признаков
-        self.feature_names = X_all.columns.tolist()
+        self.feature_names = X_train_val.columns.tolist()
 
         # Создание датасета для обучения
-        train_data = lgb.Dataset(X_all, label=y_all, feature_name=self.feature_names)
+        train_data = lgb.Dataset(X_train_val, label=y_train_val, feature_name=self.feature_names)
 
         # Обучение модели без валидационного набора
         final_model = lgb.train(
@@ -453,68 +433,271 @@ class TokenizatorModel:
             'importance': self.model.feature_importance(importance_type='gain')
         }).sort_values('importance', ascending=False)
 
-        logger.info(f"Финальная модель обучена на {len(X_all)} примерах с {len(self.feature_names)} признаками")
+        logger.info(f"Финальная модель обучена на {len(X_train_val)} примерах с {len(self.feature_names)} признаками")
 
-    def optimize_hyperparameters(
-            self,
-            X_train_val:
-            pd.DataFrame,
-            y_train_val:
-            pd.Series,
-            kfold,
-            n_trials: int = 50) -> Dict:
-        """
-        Оптимизация гиперпараметров с использованием Optuna и кросс-валидации
-        """
-        logger.info(f"Оптимизация гиперпараметров с {n_trials} испытаниями и кросс-валидацией")
-
-        best_params = optimize_hyperparameters(
-            X_train_val, y_train_val, kfold, n_trials, self.random_state)
-
-        # Сохраняем оптимальные гиперпараметры как атрибут класса
-        self.best_params = best_params
-
-        return best_params
-
-    def find_optimal_threshold(
+    def optimize_jointly(
             self,
             X_train_val: pd.DataFrame,
             y_train_val: pd.Series,
-            kfold,
-            params: Optional[Dict] = None) -> float:
+            cv_outer: int = 3,
+            cv_inner: int = 5,
+            n_trials: int = 30
+    ) -> Tuple[Dict, List[str]]:
         """
-        Поиск оптимального порога классификации для максимизации F1
+        Совместная оптимизация гиперпараметров и отбора признаков с использованием
+        вложенной кросс-валидации.
 
         Args:
-            X_train_val: DataFrame с признаками обучающей+валидационной выборки
-            y_train_val: Серия целевых значений обучающей+валидационной выборки
-            kfold: Объект кросс-валидации
-            params: Параметры
+            X_train_val: DataFrame с признаками обучающей и валидационной выборки
+            y_train_val: Серия целевых значений обучающей и валидационной выборки
+            cv_outer: Количество фолдов для внешней кросс-валидации
+            cv_inner: Количество фолдов для внутренней кросс-валидации
+            n_trials: Количество испытаний Optuna для каждого фолда внешней кросс-валидации
 
         Returns:
-            float: Оптимальный порог
+            Tuple[Dict, List[str]]: Оптимальные гиперпараметры и список выбранных признаков
         """
-        logger.info("Поиск оптимального порога классификации с кросс-валидацией")
 
-        # Использование оптимальных параметров, если они были найдены
-        if params is None:
-            if hasattr(self, 'best_params') and self.best_params:
-                params = self.best_params
-            else:
-                params = {
+        logger.info(f"Запуск совместной оптимизации с вложенной кросс-валидацией "
+                    f"({cv_outer} внешних фолдов, {cv_inner} внутренних фолдов, {n_trials} испытаний)")
+
+        # Если у нас нет сгруппированных признаков, сначала группируем их
+        if not self.feature_groups:
+            self.feature_groups = self.group_features(X_train_val)
+
+        # Создаем внешнюю кросс-валидацию для оценки стабильности результатов
+        outer_cv = StratifiedKFold(n_splits=cv_outer, shuffle=True, random_state=self.random_state)
+
+        # Словари для хранения результатов по каждому фолду
+        fold_best_params = {}
+        fold_best_features = {}
+        fold_best_scores = {}
+
+        for fold_idx, (train_idx, val_idx) in enumerate(outer_cv.split(X_train_val, y_train_val)):
+            logger.info(f"Внешний фолд {fold_idx + 1}/{cv_outer}")
+
+            # Разделение данных для текущего фолда
+            X_train_fold = X_train_val.iloc[train_idx]
+            y_train_fold = y_train_val.iloc[train_idx]
+            X_val_fold = X_train_val.iloc[val_idx]
+            y_val_fold = y_train_val.iloc[val_idx]
+
+            # Создаем внутреннюю кросс-валидацию для оптимизации
+            inner_cv = StratifiedKFold(n_splits=cv_inner, shuffle=True, random_state=self.random_state)
+
+            # Функция для создания объекта исследования Optuna
+            def create_study():
+                study_optuna = optuna.create_study(
+                    direction="maximize",
+                    sampler=optuna.samplers.TPESampler(seed=self.random_state)
+                )
+                return study_optuna
+
+            # Объект для оптимизации
+            study = create_study()
+
+            # Определение объективной функции для оптимизации
+            def objective(trial):
+                # 1. Выбор используемых групп признаков
+                selected_groups = []
+                for group_name in self.feature_groups.keys():
+                    use_group = trial.suggest_categorical(f"use_group_{group_name}", [True, False])
+                    if use_group:
+                        selected_groups.append(group_name)
+
+                # Если не выбрана ни одна группа, используем хотя бы одну случайную
+                if not selected_groups and self.feature_groups:
+                    selected_groups = [next(iter(self.feature_groups.keys()))]
+
+                # 2. Сбор всех признаков из выбранных групп
+                selected_features = []
+                for group in selected_groups:
+                    selected_features.extend(self.feature_groups[group])
+
+                # Если количество признаков слишком велико, применим дополнительный отбор
+                max_features = trial.suggest_int("max_features", min(50, len(selected_features)),
+                                                 min(200, len(selected_features)))
+
+                # Если выбрано слишком много признаков, отберем самые важные
+                if len(selected_features) > max_features:
+                    # Для отбора используем простую модель с дефолтными параметрами и feature importance
+                    temp_model = lgb.LGBMClassifier(random_state=self.random_state)
+                    temp_model.fit(X_train_fold[selected_features], y_train_fold)
+
+                    # Получение важности признаков
+                    feature_importance = pd.DataFrame({
+                        'feature': selected_features,
+                        'importance': temp_model.feature_importances_
+                    }).sort_values('importance', ascending=False)
+
+                    # Отбор топ-N признаков
+                    selected_features = feature_importance.head(max_features)['feature'].tolist()
+
+                # 3. Оптимизация гиперпараметров LightGBM
+                lgb_params = {
                     'objective': 'binary',
                     'metric': 'binary_logloss',
                     'boosting_type': 'gbdt',
-                    'num_leaves': 31,
-                    'learning_rate': 0.05,
+                    'num_leaves': trial.suggest_int('num_leaves', 15, 127),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+                    'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
+                    'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
+                    'bagging_freq': trial.suggest_int('bagging_freq', 1, 10),
+                    'lambda_l1': trial.suggest_float('lambda_l1', 1e-8, 10.0, log=True),
+                    'lambda_l2': trial.suggest_float('lambda_l2', 1e-8, 10.0, log=True),
+                    'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
+                    'max_depth': trial.suggest_int('max_depth', 3, 12),
                     'random_state': self.random_state,
                     'verbose': -1
                 }
 
-        # Поиск оптимального порога с обучением на каждом фолде
-        self.best_threshold = find_optimal_threshold(params, X_train_val, y_train_val, kfold)
+                # 4. Оптимальный порог классификации
+                threshold = trial.suggest_float('threshold', 0.1, 0.9)
 
-        return self.best_threshold
+                # 5. Кросс-валидация на внутренних фолдах
+                cv_scores = []
+                for inner_train_idx, inner_val_idx in inner_cv.split(X_train_fold, y_train_fold):
+                    # Разделение данных для внутреннего фолда
+                    X_inner_train = X_train_fold.iloc[inner_train_idx][selected_features]
+                    y_inner_train = y_train_fold.iloc[inner_train_idx]
+                    X_inner_val = X_train_fold.iloc[inner_val_idx][selected_features]
+                    y_inner_val = y_train_fold.iloc[inner_val_idx]
+
+                    # Обучение модели на внутреннем тренировочном наборе
+                    train_data = lgb.Dataset(X_inner_train, label=y_inner_train)
+                    val_data = lgb.Dataset(X_inner_val, label=y_inner_val, reference=train_data)
+
+                    callbacks = [lgb.early_stopping(20, verbose=False)]
+
+                    model = lgb.train(
+                        lgb_params,
+                        train_data,
+                        valid_sets=[val_data],
+                        callbacks=callbacks,
+                        num_boost_round=500
+                    )
+
+                    # Оценка на внутреннем валидационном наборе
+                    y_pred_proba = model.predict(X_inner_val)
+                    y_pred = (y_pred_proba > threshold).astype(int)
+                    score = f1_score(y_inner_val, y_pred)
+                    cv_scores.append(score)
+
+                # Среднее значение F1 по всем внутренним фолдам
+                mean_score = np.mean(cv_scores)
+
+                # Добавление штрафа за большое количество признаков для баланса между качеством и простотой
+                feature_penalty = 1.0 - (0.0001 * len(selected_features))
+                adjusted_score = mean_score * feature_penalty
+
+                return adjusted_score
+
+            # Запуск оптимизации для текущего внешнего фолда
+            study.optimize(objective, n_trials=n_trials, n_jobs=-1)
+
+            # Получение лучших параметров для текущего фолда
+            best_trial = study.best_trial
+            best_params = {
+                'objective': 'binary',
+                'metric': 'binary_logloss',
+                'boosting_type': 'gbdt',
+                'random_state': self.random_state,
+                'verbose': -1
+            }
+
+            # Извлечение оптимальных гиперпараметров LightGBM
+            for param_name in ['num_leaves', 'learning_rate', 'feature_fraction', 'bagging_fraction',
+                               'bagging_freq', 'lambda_l1', 'lambda_l2', 'min_child_samples', 'max_depth']:
+                if param_name in best_trial.params:
+                    best_params[param_name] = best_trial.params[param_name]
+
+            # Извлечение оптимального порога
+            best_threshold = best_trial.params.get('threshold', 0.5)
+
+            # Извлечение оптимальных групп признаков
+            selected_groups = []
+            for group_name in self.feature_groups.keys():
+                if best_trial.params.get(f"use_group_{group_name}", False):
+                    selected_groups.append(group_name)
+
+            # Если не выбрана ни одна группа, используем все группы
+            if not selected_groups and self.feature_groups:
+                selected_groups = list(self.feature_groups.keys())
+
+            # Сбор всех признаков из выбранных групп
+            selected_features = []
+            for group in selected_groups:
+                selected_features.extend(self.feature_groups[group])
+
+            # Если существует ограничение на количество признаков, применяем его
+            max_features = best_trial.params.get("max_features", len(selected_features))
+            if len(selected_features) > max_features:
+                # Обучаем модель для определения важности признаков
+                temp_model = lgb.LGBMClassifier(random_state=self.random_state)
+                temp_model.fit(X_train_fold[selected_features], y_train_fold)
+
+                # Получение важности признаков
+                feature_importance = pd.DataFrame({
+                    'feature': selected_features,
+                    'importance': temp_model.feature_importances_
+                }).sort_values('importance', ascending=False)
+
+                # Отбор топ-N признаков
+                selected_features = feature_importance.head(max_features)['feature'].tolist()
+
+            # Оценка на внешнем валидационном наборе с оптимальными параметрами
+            # Создаем копию лучших параметров без random_state, который будет добавлен в конструкторе
+            params_without_random_state = {k: v for k, v in best_params.items() if k != 'random_state'}
+            model = lgb.LGBMClassifier(random_state=self.random_state, **params_without_random_state)
+            model.fit(X_train_fold[selected_features], y_train_fold)
+
+            y_pred_proba = model.predict_proba(X_val_fold[selected_features])[:, 1]
+            y_pred = (y_pred_proba > best_threshold).astype(int)
+            val_score = f1_score(y_val_fold, y_pred)
+
+            # Сохранение результатов для текущего фолда
+            fold_best_params[fold_idx] = best_params
+            fold_best_params[fold_idx]['threshold'] = best_threshold
+            fold_best_features[fold_idx] = selected_features
+            fold_best_scores[fold_idx] = val_score
+
+            logger.info(f"Внешний фолд {fold_idx + 1} - Лучший F1: {val_score:.4f}, "
+                        f"Количество признаков: {len(selected_features)}, "
+                        f"Выбранные группы: {selected_groups}")
+
+        # Выбор лучшего фолда на основе валидационного F1-score
+        best_fold = max(fold_best_scores.items(), key=lambda x: x[1])[0]
+
+        logger.info(f"Лучший результат в фолде {best_fold + 1} с F1 = {fold_best_scores[best_fold]:.4f}")
+
+        # Сохранение оптимальных параметров и признаков
+        self.best_params = fold_best_params[best_fold]
+        self.best_threshold = self.best_params.pop('threshold', 0.5)
+        self.selected_features = fold_best_features[best_fold]
+
+        # Обучение итоговой модели на всех тренировочных данных
+        # с оптимальными параметрами и признаками
+        logger.info(f"Обучение промежуточной модели с оптимальными параметрами "
+                    f"на {len(self.selected_features)} признаках")
+
+        # Создаем копию лучших параметров без random_state, который будет добавлен в конструкторе
+        params_without_random_state = {k: v for k, v in self.best_params.items() if k != 'random_state'}
+        self.model = lgb.LGBMClassifier(random_state=self.random_state, **params_without_random_state)
+        self.model.fit(X_train_val[self.selected_features], y_train_val)
+
+        # Расчет важности признаков
+        self.feature_importance = pd.DataFrame({
+            'feature': self.selected_features,
+            'importance': self.model.feature_importances_
+        }).sort_values('importance', ascending=False)
+
+        # Резюме для логирования
+        logger.info(f"Завершена совместная оптимизация. Выбрано {len(self.selected_features)} признаков.")
+        logger.info(f"Оптимальный порог классификации: {self.best_threshold:.4f}")
+        logger.info(f"Оптимальные параметры: {self.best_params}")
+
+        return self.best_params, self.selected_features
+
 
     def analyze_fold_stability(self) -> Dict:
         """
@@ -566,121 +749,6 @@ class TokenizatorModel:
 
         return stability_metrics
 
-    def optimize_feature_groups_order_1(
-            self,
-            X_train_val: pd.DataFrame,
-            y_train_val: pd.Series,
-            feature_groups: Dict[str, List[str]],
-            kfold) -> List[str]:
-        """
-        Оптимизация порядка добавления групп признаков с использованием жадного алгоритма
-        """
-        logger.info("Оптимизация порядка добавления групп признаков")
-
-        # Базовая модель для оценки
-        base_params = {
-            'objective': 'binary',
-            'metric': 'binary_logloss',
-            'boosting_type': 'gbdt',
-            'num_leaves': 31,
-            'learning_rate': 0.05,
-            'random_state': 42,
-            'verbose': -1
-        }
-
-        # Все доступные группы
-        available_groups = list(feature_groups.keys())
-        selected_groups = []
-        current_features = []
-        best_score = 0
-
-        # Жадный алгоритм: последовательно добавляем группу, дающую наибольший прирост
-        while available_groups:
-            best_group = None
-            best_group_score = best_score
-
-            for group in available_groups:
-                # Временно добавляем группу
-                temp_features = current_features.copy()
-                temp_features.extend(feature_groups[group])
-
-                # Если нет признаков, пропускаем
-                if not temp_features:
-                    continue
-
-                # Оценка на кросс-валидации
-                fold_scores = []
-                for train_idx, val_idx in kfold.split(X_train_val, y_train_val):
-                    X_train_fold = X_train_val.iloc[train_idx][temp_features]
-                    y_train_fold = y_train_val.iloc[train_idx]
-                    X_val_fold = X_train_val.iloc[val_idx][temp_features]
-                    y_val_fold = y_train_val.iloc[val_idx]
-
-                    # Обучение модели
-                    train_data = lgb.Dataset(X_train_fold, label=y_train_fold)
-                    val_data = lgb.Dataset(X_val_fold, label=y_val_fold, reference=train_data)
-
-                    model = lgb.train(
-                        base_params,
-                        train_data,
-                        valid_sets=[val_data],
-                        callbacks=[lgb.early_stopping(10)],
-                        num_boost_round=100
-                    )
-
-                    # Оценка
-                    y_pred = model.predict(X_val_fold)
-                    y_pred_binary = (y_pred > 0.5).astype(int)
-                    f1 = f1_score(y_val_fold, y_pred_binary)
-                    fold_scores.append(f1)
-
-                # Среднее значение F1 по фолдам
-                group_score = np.mean(fold_scores)
-
-                # Обновляем лучшую группу, если нашли
-                if group_score > best_group_score:
-                    best_group = group
-                    best_group_score = group_score
-
-            # Если нашли группу, улучшающую результат, добавляем её
-            if best_group:
-                selected_groups.append(best_group)
-                current_features.extend(feature_groups[best_group])
-                available_groups.remove(best_group)
-                best_score = best_group_score
-                logger.info(f"Добавлена группа '{best_group}': F1 = {best_score:.4f}, "
-                            f"Всего признаков = {len(current_features)}")
-            else:
-                # Если ни одна группа не улучшает результат, выходим из цикла
-                break
-
-        # Если после жадного выбора остались неиспользованные группы, добавляем их в конец
-        for group in available_groups:
-            selected_groups.append(group)
-            logger.warning(f"Группа '{group}' добавлена в конец списка без улучшения F1")
-
-        logger.info(f"Оптимизированная последовательность групп: {selected_groups}")
-        return selected_groups
-
-    def optimize_feature_groups_order(
-            self,
-            X_train_val: pd.DataFrame,
-            y_train_val: pd.Series,
-            kfold) -> List[str]:
-        """
-        Оптимизация порядка добавления групп признаков с использованием жадного алгоритма
-        """
-        if not self.feature_groups:
-            self.feature_groups = self.group_features(X_train_val)
-
-        # Создаем отфильтрованную версию feature_groups только с теми признаками, которые действительно присутствуют в X_train_val
-        filtered_feature_groups = {}
-        for group, features in self.feature_groups.items():
-            filtered_features = [f for f in features if f in X_train_val.columns]
-            if filtered_features:  # Включаем группу только если в ней есть хотя бы один признак
-                filtered_feature_groups[group] = filtered_features
-
-        return self.optimize_feature_groups_order_1(X_train_val, y_train_val, filtered_feature_groups, kfold)
 
     def select_optimal_imbalance_method(
             self,
