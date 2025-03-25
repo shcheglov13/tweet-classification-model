@@ -200,7 +200,8 @@ def train_tokenizator_model(
             X_train_val_selected,
             y_train_val_balanced,
             cv=n_splits,
-            output_path=os.path.join(output_dir, 'learning_curve.png')
+            output_path=os.path.join(output_dir, 'learning_curve.png'),
+            random_state=random_state
         )
 
         # 24. Визуализация значений SHAP

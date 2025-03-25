@@ -7,7 +7,7 @@ import seaborn as sns
 import logging
 
 from sklearn.calibration import calibration_curve
-from sklearn.model_selection import learning_curve
+from sklearn.model_selection import learning_curve, StratifiedKFold
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -143,7 +143,8 @@ def visualize_learning_curve(
         X_train: pd.DataFrame,
         y_train: pd.Series,
         cv: int = 5,
-        output_path: str = 'learning_curve.png') -> None:
+        output_path: str = 'learning_curve.png',
+        random_state: int = 42) -> None:
     """
     Визуализация кривой обучения
 
@@ -153,6 +154,7 @@ def visualize_learning_curve(
         y_train: Серия целевых значений обучающей выборки
         cv: Количество фолдов для кросс-валидации
         output_path: Путь для сохранения изображения
+        random_state: Seed для воспроизводимости результатов
     """
     # Проверка наличия обоих классов
     class_counts = y_train.value_counts()
@@ -183,8 +185,34 @@ def visualize_learning_curve(
 
         logger.info(f"Расчет кривой обучения с метрикой: {scoring}")
 
+        stratified_kfold = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
+
+        # Проверка всех фолдов на представленность классов
+        fold_issues = []
+        for i, (train_idx, test_idx) in enumerate(stratified_kfold.split(X_train, y_train)):
+            y_train_fold = y_train.iloc[train_idx]
+            y_test_fold = y_train.iloc[test_idx]
+
+            # Проверка наличия всех классов в обучающей и тестовой выборках
+            if len(y_train_fold.unique()) < 2:
+                fold_issues.append(f"Фолд {i+1}: в обучающей выборке отсутствует один из классов: {set(y_train_fold.unique())}")
+            if len(y_test_fold.unique()) < 2:
+                fold_issues.append(f"Фолд {i+1}: в тестовой выборке отсутствует один из классов: {set(y_test_fold.unique())}")
+
+        # Если есть проблемы с представленностью классов в фолдах
+        if fold_issues:
+            for issue in fold_issues:
+                logger.warning(issue)
+            logger.info("Попытка использования альтернативной стратегии с принудительной стратификацией")
+
+            # Используем более надежную стратегию для очень несбалансированных данных
+            # Из библиотеки imblearn или просто используем accuracy метрику
+            if scoring == 'f1':
+                logger.info("Переключаемся на метрику accuracy из-за проблем со стратификацией")
+                scoring = 'accuracy'
+
         train_sizes, train_scores, test_scores = learning_curve(
-            estimator, X_train, y_train, cv=cv, n_jobs=-1,
+            estimator, X_train, y_train, cv=stratified_kfold, n_jobs=-1,
             train_sizes=np.linspace(0.1, 1.0, 10),
             scoring=scoring
         )
