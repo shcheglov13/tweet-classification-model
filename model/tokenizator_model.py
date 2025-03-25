@@ -107,6 +107,7 @@ class TokenizatorModel:
 
         return X_reduced, to_drop
 
+
     def select_features_with_optimal_parameters(
             self,
             X_train_val: pd.DataFrame,
@@ -153,19 +154,14 @@ class TokenizatorModel:
                     'random_state': self.random_state
                 }
 
-        # Функция для создания объекта исследования Optuna
-        def create_study():
-            study_optuna = optuna.create_study(
-                direction="maximize",
-                sampler=optuna.samplers.TPESampler(seed=self.random_state)
-            )
-            return study_optuna
-
         # Создаем кросс-валидацию
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=self.random_state)
 
         # Объект для оптимизации
-        study = create_study()
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(seed=self.random_state)
+        )
 
         # Определение объективной функции для оптимизации
         def objective(trial):
@@ -175,13 +171,14 @@ class TokenizatorModel:
             for group_name, weight in group_weights.items():
                 # Нормализуем вес к вероятности (от 0 до 1)
                 prob = min(1.0, max(0.1, weight / max(group_weights.values())))
-                use_group = trial.suggest_categorical(f"use_group_{group_name}",
-                                                      [True, False],
-                                                      [prob, 1.0 - prob])
+
+                random_value = trial.suggest_float(f"prob_{group_name}", 0.0, 1.0)
+                use_group = random_value < prob
+
                 if use_group:
                     selected_groups.append(group_name)
 
-            # Если не выбрана ни одна группа, используем случайную
+            # Если не выбрана ни одна группа, используем случайную с учетом весов
             if not selected_groups and self.feature_groups:
                 group_probs = np.array(list(group_weights.values()))
                 group_probs = group_probs / group_probs.sum()
@@ -254,10 +251,12 @@ class TokenizatorModel:
         # Получение лучших параметров
         best_trial = study.best_trial
 
-        # Извлечение выбранных групп признаков
+        # Восстановление выбранных групп признаков из лучшего решения
         selected_groups = []
-        for group_name in self.feature_groups.keys():
-            if best_trial.params.get(f"use_group_{group_name}", False):
+        for group_name, weight in group_weights.items():
+            prob = min(1.0, max(0.1, weight / max(group_weights.values())))
+            random_value = best_trial.params.get(f"prob_{group_name}", 0.5)
+            if random_value < prob:
                 selected_groups.append(group_name)
 
         # Если не выбрана ни одна группа, используем все группы
@@ -298,6 +297,7 @@ class TokenizatorModel:
         self.selected_features = final_features
 
         return X_train_val[final_features], final_features
+
 
     def group_features(self, X: pd.DataFrame) -> Dict[str, List[str]]:
         """
