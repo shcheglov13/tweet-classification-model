@@ -336,6 +336,9 @@ class TokenizatorModel:
         logger.info(f"На основе инкрементальной оценки выбрано {len(selected_features)} признаков")
         self.selected_features = selected_features
 
+        # Обновляем feature_groups, удаляя исключенные группы
+        self.feature_groups = {group: self.feature_groups[group] for group in significant_groups}
+
         return X_train_val[selected_features]
 
     def split_data(
@@ -670,7 +673,14 @@ class TokenizatorModel:
         if not self.feature_groups:
             self.feature_groups = self.group_features(X_train_val)
 
-        return self.optimize_feature_groups_order_1(X_train_val, y_train_val, self.feature_groups, kfold)
+        # Создаем отфильтрованную версию feature_groups только с теми признаками, которые действительно присутствуют в X_train_val
+        filtered_feature_groups = {}
+        for group, features in self.feature_groups.items():
+            filtered_features = [f for f in features if f in X_train_val.columns]
+            if filtered_features:  # Включаем группу только если в ней есть хотя бы один признак
+                filtered_feature_groups[group] = filtered_features
+
+        return self.optimize_feature_groups_order_1(X_train_val, y_train_val, filtered_feature_groups, kfold)
 
     def select_optimal_imbalance_method(
             self,
@@ -728,7 +738,10 @@ class TokenizatorModel:
                 # Обновление параметров модели, если необходимо
                 current_params = base_params.copy()
                 if 'class_weight' in imbalance_params:
-                    current_params['class_weight'] = imbalance_params['class_weight']
+                    # Для бинарной классификации используем scale_pos_weight
+                    weight_pos = imbalance_params['class_weight'].get(1, 1.0)
+                    weight_neg = imbalance_params['class_weight'].get(0, 1.0)
+                    current_params['scale_pos_weight'] = weight_neg / weight_pos
 
                 # Обучение модели
                 lgb_train = lgb.Dataset(X_train_processed, y_train_processed)
