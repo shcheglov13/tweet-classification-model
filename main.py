@@ -74,10 +74,6 @@ def train_tokenizator_model(
             valid_df = df
             valid_features_df = features_df
 
-        # Логирование информации об извлечении признаков
-        mlflow.log_param("total_features", valid_features_df.shape[1])
-        mlflow.log_param("valid_posts", len(valid_df))
-
         # 3. Инициализация модели
         logger.info("Инициализация модели...")
         model = TokenizatorModel(random_state=random_state)
@@ -88,18 +84,9 @@ def train_tokenizator_model(
         y = valid_df['total_trade_volume']
         X, y_binary = model.preprocess_data(X, y, threshold=threshold)
 
-        # Логирование информации о предобработке
-        mlflow.log_param("threshold", threshold)
-        mlflow.log_param("positive_class_ratio", y_binary.mean())
-
         # 5. Удаление сильно коррелирующих признаков
         logger.info("Удаление сильно коррелирующих признаков...")
         X_reduced, dropped_features = model.analyze_feature_correlations(X, threshold=0.9)
-
-        # Логирование информации об анализе корреляций
-        mlflow.log_param("initial_features", X.shape[1])
-        mlflow.log_param("features_after_correlation", X_reduced.shape[1])
-        mlflow.log_param("dropped_correlated_features", len(dropped_features))
 
         # 6. Группировка признаков по типу
         logger.info("Группировка признаков по типу...")
@@ -110,42 +97,82 @@ def train_tokenizator_model(
         X_train_val, X_test, y_train_val, y_test, kfold = model.split_data(
             X_reduced, y_binary, n_splits=n_splits, test_size=test_size)
 
-        # Логирование информации о разделении
-        mlflow.log_param("n_splits", n_splits)
-        mlflow.log_param("test_size", test_size)
-        mlflow.log_param("train_val_size", X_train_val.shape[0])
-        mlflow.log_param("test_size_actual", X_test.shape[0])
+        # 8. Анализ распределения классов
+        class_stats = model.analyze_class_distribution(y_train_val)
+        mlflow.log_params({
+            'imbalance_ratio': class_stats['imbalance_ratio'],
+            'uniformity_index': class_stats['uniformity_index']
+        })
 
-        # 8. Выбор признаков с использованием кросс-валидации
-        logger.info("Выбор признаков с кросс-валидацией...")
-        X_train_val_selected, selected_features = model.select_features(
-            X_train_val, y_train_val, kfold, k=100)
-        X_test_selected = X_test[selected_features]
-
-        # Логирование информации о выборе признаков
-        mlflow.log_param("selected_features_count", len(selected_features))
-
-        # 9. Инкрементальная оценка признаков с кросс-валидацией
-        logger.info("Инкрементальная оценка групп признаков с кросс-валидацией...")
-        incremental_results = model.incremental_feature_evaluation(
+        # 9. Определение оптимального метода обработки дисбаланса
+        best_imbalance_method, imbalance_params = model.select_optimal_imbalance_method(
             X_train_val, y_train_val, kfold)
+        mlflow.log_param('imbalance_method', best_imbalance_method)
 
-        # 10. Обучение модели с кросс-валидацией
-        logger.info("Обучение модели с кросс-валидацией...")
-        fold_results = model.train(X_train_val_selected, y_train_val, kfold)
+        # 10. Обработка дисбаланса с использованием лучшего метода
+        X_train_val_balanced, y_train_val_balanced, _ = model.handle_class_imbalance(
+            X_train_val, y_train_val, method=best_imbalance_method)
 
-        # 11. Оптимизация гиперпараметров с кросс-валидацией
+        # 11. Сохранение параметров для модели
+        balance_params = {}
+        if 'class_weight' in imbalance_params:
+            balance_params['class_weight'] = imbalance_params['class_weight']
+
+        # 12. Оптимизация гиперпараметров
         logger.info("Оптимизация гиперпараметров с кросс-валидацией...")
-        model.optimize_hyperparameters(X_train_val_selected, y_train_val, kfold, n_trials=30)
+        best_params = model.optimize_hyperparameters(X_train_val_balanced, y_train_val_balanced, kfold, n_trials=30)
 
-        # 12. Поиск оптимального порога с кросс-валидацией
+        # Добавляем параметры для обработки дисбаланса, если необходимо
+        if 'class_weight' in imbalance_params:
+            best_params['class_weight'] = imbalance_params['class_weight']
+
+        # 13. Инкрементальная оценка групп признаков
+        logger.info("Инкрементальная оценка групп признаков...")
+        incremental_results = model.incremental_feature_evaluation(
+            X_train_val_balanced, y_train_val_balanced, kfold)
+
+        # 14. Применение результатов инкрементальной оценки
+        logger.info("Применение результатов инкрементальной оценки...")
+        X_train_val_filtered = model.apply_incremental_evaluation_results(
+            X_train_val_balanced, min_contribution=0.001)
+
+        # Обновляем тестовый набор с учетом выбранных признаков
+        X_test_filtered = X_test[model.selected_features]
+
+        # 15. Оптимизация порядка групп признаков
+        logger.info("Оптимизация порядка групп признаков...")
+        optimal_group_order = model.optimize_feature_groups_order(
+            X_train_val_filtered, y_train_val_balanced, kfold)
+
+        # 16. Окончательный выбор признаков с учетом оптимального порядка групп
+        logger.info("Финальный выбор признаков с оптимизированным порядком групп...")
+        X_train_val_selected, selected_features = model.select_features_with_optimal_groups(
+            X_train_val_filtered, y_train_val_balanced, kfold, optimal_group_order, k=100)
+        X_test_selected = X_test_filtered[selected_features]
+
+        # 17. Поиск оптимального порога с оптимизированными параметрами и признаками
         logger.info("Поиск оптимального порога с кросс-валидацией...")
-        optimal_threshold = model.find_optimal_threshold(X_train_val_selected, y_train_val, kfold)
+        optimal_threshold = model.find_optimal_threshold(
+            X_train_val_selected, y_train_val_balanced, kfold, params=best_params)
 
-        # Логирование информации о пороге
-        mlflow.log_param("optimal_threshold", optimal_threshold)
+        # 18. Обучение модели с выбранными признаками, оптимальными гиперпараметрами и порогом
+        logger.info("Обучение финальной модели с кросс-валидацией...")
+        fold_results = model.train(
+            X_train_val_selected, y_train_val_balanced, kfold, params=best_params, threshold=optimal_threshold)
 
-        # 13. Оценка модели на тестовой выборке
+        # 19. Анализ стабильности результатов между фолдами
+        logger.info("Анализ стабильности результатов между фолдами...")
+        stability_metrics = model.analyze_fold_stability()
+
+        # 20. Переобучение финальной модели на всех данных
+        logger.info("Переобучение финальной модели на всех данных...")
+        model.train_final_model(
+            pd.concat([X_train_val_selected, X_test_selected]),
+            pd.concat([y_train_val_balanced, y_test]),
+            params=best_params
+        )
+
+        # 21. Оценка модели на тестовой выборке
         logger.info("Оценка модели на тестовой выборке...")
         test_metrics = model.evaluate(X_test_selected, y_test, threshold=optimal_threshold)
 
@@ -154,37 +181,37 @@ def train_tokenizator_model(
             if isinstance(metric_value, (int, float)):
                 mlflow.log_metric(metric_name, metric_value)
 
-        # 14. Расчет и визуализация лифта
+        # 22. Расчет и визуализация лифта
         logger.info("Расчет и визуализация лифта...")
         bin_metrics = model.compute_lift(X_test_selected, y_test, bins=10)
         visualize_lift(bin_metrics, output_path=os.path.join(output_dir, 'lift_charts.png'))
 
-        # 15. Визуализация важности признаков
+        # 23. Визуализация важности признаков
         logger.info("Визуализация важности признаков...")
         visualize_feature_importance(model.feature_importance, top_n=30,
                                      output_path=os.path.join(output_dir, 'feature_importance.png'))
 
-        # 16. Визуализация матрицы ошибок
+        # 24. Визуализация матрицы ошибок
         logger.info("Визуализация матрицы ошибок...")
         visualize_confusion_matrix(test_metrics['confusion_matrix'],
                                    output_path=os.path.join(output_dir, 'confusion_matrix.png'))
 
-        # 17. Визуализация ROC-кривой
+        # 25. Визуализация ROC-кривой
         logger.info("Визуализация ROC-кривой...")
         visualize_roc_curve(y_test, test_metrics['y_pred_proba'],
                             output_path=os.path.join(output_dir, 'roc_curve.png'))
 
-        # 18. Визуализация PR-кривой
+        # 26. Визуализация PR-кривой
         logger.info("Визуализация PR-кривой...")
         visualize_pr_curve(y_test, test_metrics['y_pred_proba'],
                            output_path=os.path.join(output_dir, 'pr_curve.png'))
 
-        # 19. Визуализация кривой калибровки
+        # 27. Визуализация кривой калибровки
         logger.info("Визуализация кривой калибровки...")
         visualize_calibration_curve(y_test, test_metrics['y_pred_proba'],
                                     output_path=os.path.join(output_dir, 'calibration_curve.png'))
 
-        # 20. Визуализация кривой обучения (не требует изменений)
+        # 28. Визуализация кривой обучения (не требует изменений)
         logger.info("Визуализация кривой обучения...")
         lgb_model = lightgbm.LGBMClassifier(
             random_state=random_state,
@@ -198,13 +225,13 @@ def train_tokenizator_model(
             output_path=os.path.join(output_dir, 'learning_curve.png')
         )
 
-        # 21. Визуализация значений SHAP
+        # 29. Визуализация значений SHAP
         logger.info("Визуализация значений SHAP...")
         visualize_shap_values(model.model, X_test_selected,
                               n_samples=min(100, len(X_test_selected)),
                               output_dir=output_dir)
 
-        # 22. Сохранение модели
+        # 30. Сохранение модели
         logger.info("Сохранение модели...")
         model_path = os.path.join(output_dir, 'tokenizator_model.txt')
         model.save_model(model_path)
@@ -230,7 +257,6 @@ def train_tokenizator_model(
         raise
 
     finally:
-        # Завершение отслеживания MLflow
         mlflow.end_run()
 
 

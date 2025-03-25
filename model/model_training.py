@@ -33,6 +33,13 @@ def split_data(
     """
     logger.info(f"Разделение данных на тестовую выборку и {n_splits}-фолдовую кросс-валидацию")
 
+    # Проверка минимального размера классов
+    min_class_size = y.value_counts().min()
+    if min_class_size < n_splits:
+        logger.warning(f"Минимальный размер класса ({min_class_size}) меньше количества фолдов ({n_splits}). "
+                     f"Уменьшаем количество фолдов до {min_class_size}.")
+        n_splits = min_class_size
+
     # Разделение на train+val и test
     X_train_val, X_test, y_train_val, y_test = train_test_split(
         X, y, test_size=test_size, random_state=random_state, stratify=y
@@ -52,7 +59,8 @@ def train_model(
         y_train_val: pd.Series,
         kfold,
         params: Optional[Dict] = None,
-        feature_names: Optional[List[str]] = None) -> Tuple[lgb.Booster, pd.DataFrame, Dict]:
+        feature_names: Optional[List[str]] = None,
+        threshold: float = 0.5) -> Tuple[lgb.Booster, pd.DataFrame, Dict]:
     """
     Обучение модели LightGBM с использованием кросс-валидации
 
@@ -62,11 +70,11 @@ def train_model(
         kfold: Объект кросс-валидации (StratifiedKFold)
         params: Параметры модели LightGBM
         feature_names: Имена признаков
-
+        :param threshold:
     Returns:
         Tuple[lgb.Booster, pd.DataFrame, Dict]: Лучшая модель, важность признаков, результаты по фолдам
     """
-    logger.info("Обучение модели LightGBM с кросс-валидацией")
+    logger.info(f"Обучение модели LightGBM с кросс-валидацией и порогом {threshold}")
 
     # Параметры по умолчанию, если не указаны
     if params is None:
@@ -85,7 +93,6 @@ def train_model(
             'min_child_samples': 20,
             'max_depth': 8,
             'random_state': 42,
-            # Настройки GPU
             'device': 'gpu',
             'gpu_platform_id': 0,
             'gpu_device_id': 0,
@@ -140,11 +147,11 @@ def train_model(
         # Обновление общей важности признаков
         combined_importance['importance'] += fold_importance['importance'] / kfold.n_splits
 
-        # Оценка модели на валидационной выборке
-        y_pred = model.predict(X_val_fold)
-        y_pred_binary = (y_pred > 0.5).astype(int)
+        # Оценка модели на валидационной выборке, используя переданный порог
+        y_pred_proba = model.predict(X_val_fold)
+        y_pred_binary = (y_pred_proba > threshold).astype(int)
 
-        # Расчет метрик
+        # Расчет метрик с использованием переданного порога
         metrics = {
             'f1': f1_score(y_val_fold, y_pred_binary),
             'precision': precision_score(y_val_fold, y_pred_binary),
@@ -173,21 +180,12 @@ def train_model(
 
 
 def find_optimal_threshold(
-        model: lgb.Booster,
+        params: Dict,
         X_train_val: pd.DataFrame,
         y_train_val: pd.Series,
         kfold) -> float:
     """
-    Поиск оптимального порога классификации на основе F1-score с использованием кросс-валидации
-
-    Args:
-        model: Обученная модель LightGBM
-        X_train_val: DataFrame с признаками обучающей+валидационной выборки
-        y_train_val: Серия целевых значений обучающей+валидационной выборки
-        kfold: Объект кросс-валидации
-
-    Returns:
-        float: Оптимальный порог классификации
+    Поиск оптимального порога с обучением отдельной модели для каждого фолда
     """
     logger.info("Поиск оптимального порога классификации с кросс-валидацией")
 
@@ -195,13 +193,28 @@ def find_optimal_threshold(
     all_preds = []
     all_true = []
 
-    # Получение предсказаний на каждом фолде
+    # Получение предсказаний на каждом фолде с обучением модели
     for train_idx, val_idx in kfold.split(X_train_val, y_train_val):
         # Разделение данных для текущего фолда
+        X_train_fold = X_train_val.iloc[train_idx]
+        y_train_fold = y_train_val.iloc[train_idx]
         X_val_fold = X_train_val.iloc[val_idx]
         y_val_fold = y_train_val.iloc[val_idx]
 
-        # Получение предсказаний
+        # Создание объектов датасета
+        train_data = lgb.Dataset(X_train_fold, label=y_train_fold)
+        val_data = lgb.Dataset(X_val_fold, label=y_val_fold, reference=train_data)
+
+        # Обучение модели на текущем фолде
+        model = lgb.train(
+            params,
+            train_data,
+            valid_sets=[val_data],
+            callbacks=[lgb.early_stopping(50)],
+            num_boost_round=1000
+        )
+
+        # Получение предсказаний для текущего валидационного фолда
         y_pred_val = model.predict(X_val_fold)
 
         # Сохранение предсказаний и истинных значений
