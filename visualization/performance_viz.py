@@ -138,8 +138,12 @@ def visualize_calibration_curve(y_true: np.ndarray, y_pred_proba: np.ndarray,
     logger.info(f"Кривая калибровки сохранена в '{output_path}'")
 
 
-def visualize_learning_curve(estimator: Any, X_train: pd.DataFrame, y_train: pd.Series,
-                             cv: int = 5, output_path: str = 'learning_curve.png') -> None:
+def visualize_learning_curve(
+        estimator: Any,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        cv: int = 5,
+        output_path: str = 'learning_curve.png') -> None:
     """
     Визуализация кривой обучения
 
@@ -150,34 +154,71 @@ def visualize_learning_curve(estimator: Any, X_train: pd.DataFrame, y_train: pd.
         cv: Количество фолдов для кросс-валидации
         output_path: Путь для сохранения изображения
     """
-    # Расчет кривой обучения
-    train_sizes, train_scores, test_scores = learning_curve(
-        estimator, X_train, y_train, cv=cv, n_jobs=-1,
-        train_sizes=np.linspace(0.1, 1.0, 10),
-        scoring='f1'
-    )
+    # Проверка наличия обоих классов
+    class_counts = y_train.value_counts()
+    logger.info(f"Визуализация кривой обучения. Распределение классов: {class_counts.to_dict()}")
 
-    # Расчет среднего и стандартного отклонения
-    train_mean = np.mean(train_scores, axis=1)
-    train_std = np.std(train_scores, axis=1)
-    test_mean = np.mean(test_scores, axis=1)
-    test_std = np.std(test_scores, axis=1)
+    if len(class_counts) < 2 or 1 not in class_counts or 0 not in class_counts:
+        logger.error(f"ОШИБКА! В данных отсутствует один из классов: {class_counts.to_dict()}")
+        logger.error("Невозможно построить кривую обучения с метрикой F1")
 
-    # Построение кривой обучения
-    plt.figure(figsize=(10, 6))
-    plt.plot(train_sizes, train_mean, color='blue', marker='o', markersize=5, label='Оценка на обучающей выборке')
-    plt.fill_between(train_sizes, train_mean + train_std, train_mean - train_std, alpha=0.15, color='blue')
-    plt.plot(train_sizes, test_mean, color='green', marker='s', markersize=5, label='Оценка на кросс-валидации')
-    plt.fill_between(train_sizes, test_mean + test_std, test_mean - test_std, alpha=0.15, color='green')
-    plt.xlabel('Количество обучающих примеров')
-    plt.ylabel('F1 Score')
-    plt.title('Кривая обучения')
-    plt.legend(loc='lower right')
-    plt.grid(True, alpha=0.3)
-    plt.savefig(output_path)
-    plt.close()
+        # Создаем пустое изображение с сообщением об ошибке
+        plt.figure(figsize=(10, 6))
+        plt.text(0.5, 0.5, 'Ошибка: невозможно построить кривую обучения.\nВ данных отсутствует один из классов.',
+                 horizontalalignment='center', verticalalignment='center', fontsize=12)
+        plt.axis('off')
+        plt.savefig(output_path)
+        plt.close()
+        return
 
-    logger.info(f"Кривая обучения сохранена в '{output_path}'")
+    try:
+        # Расчет кривой обучения с настройкой метрики
+        # Используем accuracy вместо f1, если в данных мало примеров положительного класса
+        if class_counts.get(1, 0) < 5:
+            logger.warning(
+                f"Мало примеров положительного класса ({class_counts.get(1, 0)}). Используем метрику accuracy.")
+            scoring = 'accuracy'
+        else:
+            scoring = 'f1'
+
+        logger.info(f"Расчет кривой обучения с метрикой: {scoring}")
+
+        train_sizes, train_scores, test_scores = learning_curve(
+            estimator, X_train, y_train, cv=cv, n_jobs=-1,
+            train_sizes=np.linspace(0.1, 1.0, 10),
+            scoring=scoring
+        )
+
+        # Расчет среднего и стандартного отклонения
+        train_mean = np.mean(train_scores, axis=1)
+        train_std = np.std(train_scores, axis=1)
+        test_mean = np.mean(test_scores, axis=1)
+        test_std = np.std(test_scores, axis=1)
+
+        # Построение кривой обучения
+        plt.figure(figsize=(10, 6))
+        plt.plot(train_sizes, train_mean, color='blue', marker='o', markersize=5, label='Оценка на обучающей выборке')
+        plt.fill_between(train_sizes, train_mean + train_std, train_mean - train_std, alpha=0.15, color='blue')
+        plt.plot(train_sizes, test_mean, color='green', marker='s', markersize=5, label='Оценка на кросс-валидации')
+        plt.fill_between(train_sizes, test_mean + test_std, test_mean - test_std, alpha=0.15, color='green')
+        plt.xlabel('Количество обучающих примеров')
+        plt.ylabel(f'Метрика: {scoring}')
+        plt.title('Кривая обучения')
+        plt.legend(loc='lower right')
+        plt.grid(True, alpha=0.3)
+        plt.savefig(output_path)
+        plt.close()
+
+        logger.info(f"Кривая обучения сохранена в '{output_path}'")
+    except Exception as e:
+        logger.error(f"Ошибка при создании кривой обучения: {e}")
+        # Создаем пустое изображение с сообщением об ошибке
+        plt.figure(figsize=(10, 6))
+        plt.text(0.5, 0.5, f'Ошибка: {str(e)}',
+                 horizontalalignment='center', verticalalignment='center', fontsize=12)
+        plt.axis('off')
+        plt.savefig(output_path)
+        plt.close()
 
 
 def visualize_lift(bin_metrics: pd.DataFrame, output_path: str = 'lift_charts.png') -> None:

@@ -191,14 +191,15 @@ def train_tokenizator_model(
         # 23. Визуализация кривой обучения
         logger.info("Визуализация кривой обучения...")
         lgb_model = lightgbm.LGBMClassifier(
-            random_state=random_state,
-            feature_name='auto'
+            random_state=random_state
         )
-        # Используем произвольный фолд для визуализации кривой обучения
-        train_idx, val_idx = next(kfold.split(X_train_val_selected, y_train_val))
+
+        # Передаем весь сбалансированный датасет для визуализации кривой обучения
         visualize_learning_curve(
             lgb_model,
-            X_train_val_selected.iloc[train_idx], y_train_val.iloc[train_idx],
+            X_train_val_selected,
+            y_train_val_balanced,
+            cv=n_splits,
             output_path=os.path.join(output_dir, 'learning_curve.png')
         )
 
