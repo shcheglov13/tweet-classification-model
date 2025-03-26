@@ -810,7 +810,7 @@ class TokenizatorModel:
                     # Для бинарной классификации используем scale_pos_weight
                     weight_pos = imbalance_params['class_weight'].get(1, 1.0)
                     weight_neg = imbalance_params['class_weight'].get(0, 1.0)
-                    current_params['scale_pos_weight'] = weight_neg / weight_pos
+                    current_params['scale_pos_weight'] = weight_pos / weight_neg
 
                 # Обучение модели
                 lgb_train = lgb.Dataset(X_train_processed, y_train_processed)

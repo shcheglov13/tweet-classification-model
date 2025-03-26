@@ -97,7 +97,8 @@ class StructuralFeatureExtractor(BaseExtractor):
 
         # Тип твита (one-hot кодирование)
         tweet_types = pd.get_dummies(df['tweet_type'], prefix='tweet_type')
-        structural_df = pd.concat([structural_df, tweet_types], axis=1)
+        for col in tweet_types.columns:
+            structural_df[col] = tweet_types[col]
 
         # Наличие изображения
         structural_df['has_image'] = df['image_url'].notna() & (df['image_url'] != "")
@@ -110,10 +111,12 @@ class StructuralFeatureExtractor(BaseExtractor):
             text_len = len(row['text']) if row['text'] else 0
             quoted_len = len(row['quoted_text']) if row['quoted_text'] else 0
 
-            if quoted_len > 0:
+            # Вычисляем отношение только если присутствуют оба текста
+            if quoted_len > 0 and text_len > 0:
                 structural_df.at[idx, 'text_quoted_ratio'] = text_len / quoted_len
             else:
-                structural_df.at[idx, 'text_quoted_ratio'] = 0 if text_len == 0 else float('inf')
+                # Используем NaN как признак отсутствия отношения
+                structural_df.at[idx, 'text_quoted_ratio'] = np.nan
 
     def _extract_text_diversity_features(self, df: pd.DataFrame, structural_df: pd.DataFrame) -> None:
         """

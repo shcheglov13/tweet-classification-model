@@ -122,11 +122,12 @@ def group_features(X: pd.DataFrame) -> Dict[str, List[str]]:
     # Определение шаблонов для идентификации групп признаков
     patterns = {
         'bertweet': 'bertweet_emb_',
-        'text_metrics': 'text_|word_count|avg_word_length',
+        'text_metrics': 'text_|word_count|avg_word_length|combined_text_length',
+        'content_metrics': 'hashtag_|mention_|url_|emoji_',
         'informal_slang': 'uppercase_ratio|word_elongation|excessive_punctuation|perplexity',
         'clip': 'clip_emb_',
         'emotional': 'emotion_|emotional_',
-        'structural': 'tweet_type|has_image',
+        'structural': 'tweet_type_|has_image|has_quoted_text',
         'temporal': 'hour|day_of_week|is_weekend'
     }
 
