@@ -72,6 +72,9 @@ class AttributesFeatureExtractor(BaseExtractor):
             df = df.copy()
             df['attributes'] = df.apply(lambda _: {}, axis=1)
 
+        # Расчет индекса эмоциональной интенсивности (EID)
+        attributes_df['eid'] = df.apply(lambda row: self._calculate_eid(row['attributes']), axis=1)
+
         # Извлечение значений атрибутов
         for attr in self.all_attributes:
             attributes_df[attr] = df.apply(lambda row: self._get_attribute_value(row, attr), axis=1)
@@ -96,3 +99,23 @@ class AttributesFeatureExtractor(BaseExtractor):
         if isinstance(row['attributes'], dict) and attribute in row['attributes']:
             return row['attributes'][attribute]
         return 0.0
+
+
+    def _calculate_eid(self, attributes):
+        em_sum = sum(attributes[f"EM{i}"] for i in range(1, 12) if i != 4)
+
+        # Maximum of emotional attributes except neutral
+        emotion_max = max(
+            attributes["EM1"], attributes["EM2"], attributes["EM3"],
+            attributes["EM5"], attributes["EM7"], attributes["EM11"],
+            attributes["EM6"], attributes["EM8"], attributes["EM9"],
+            attributes["EM10"]
+        )
+
+        # Count significant emotional attributes (value > 0.7)
+        significant_count = sum(1 for i in range(1, 12) if i != 4 and attributes[f"EM{i}"] > 0.7)
+
+        # Calculate EID
+        eid = (em_sum - attributes["EM4"]) * emotion_max / np.sqrt(1 + significant_count)
+
+        return eid
