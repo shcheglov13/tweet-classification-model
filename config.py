@@ -11,9 +11,9 @@ PLOTS_DIR = os.path.join(BASE_DIR, 'plots')
 
 # Настройки по умолчанию
 DEFAULT_RANDOM_STATE = 42
-DEFAULT_THRESHOLD = 100  # Порог для бинарной классификации
+DEFAULT_THRESHOLD = 50  # Порог для бинарной классификации
 DEFAULT_MODEL_PATH = os.path.join(MODELS_DIR, 'tokenizator_model.txt')
-DEFAULT_DATA_FILE = 'tweet_dataset.json'
+DEFAULT_DATA_FILE = 'tweet_dataset_attributes.json'
 
 # Настройки моделей
 BERTWEET_MODEL_NAME = 'vinai/bertweet-base'

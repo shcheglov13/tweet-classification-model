@@ -197,7 +197,8 @@ def train_tokenizator_model(
             y_train_val_balanced,
             cv=n_splits,
             output_path=os.path.join(output_dir, 'learning_curve.png'),
-            random_state=random_state
+            random_state=random_state,
+            final_params=final_params
         )
 
         # 24. Визуализация значений SHAP
@@ -248,7 +249,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    logger.info("Запуск конвейера модели Tokenizator")
+    logger.info("Запуск конвейера модели tweet-classifier-model")
 
     try:
         # Создание директорий
@@ -267,8 +268,6 @@ if __name__ == "__main__":
 
         # Вывод сводки
         logger.info("Конвейер модели успешно завершен")
-        logger.info(f"Точность модели: {trained_model.model_metrics['accuracy']:.4f}")
-        logger.info(f"F1-score модели: {trained_model.model_metrics['f1']:.4f}")
 
     except Exception as e:
         logger.error(f"Ошибка в выполнении конвейера: {e}", exc_info=True)

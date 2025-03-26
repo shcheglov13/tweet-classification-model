@@ -102,8 +102,8 @@ class TokenizatorModel:
         """
         logger.info(f"Анализ корреляций признаков с порогом {threshold}")
 
-        # Вызов функции анализа корреляций
         X_reduced, to_drop = analyze_correlations(X, threshold)
+        logger.info(f"Осталось признаков после удаления коррелирующих: {X_reduced.shape[1]} (было {X.shape[1]})")
 
         return X_reduced, to_drop
 
@@ -770,7 +770,8 @@ class TokenizatorModel:
         logger.info("Выбор оптимального метода обработки дисбаланса с кросс-валидацией")
 
         # Методы для тестирования
-        methods = ['none', 'class_weight', 'oversample', 'undersample', 'smote']
+        # methods = ['none', 'class_weight', 'oversample', 'undersample', 'smote']
+        methods = ['class_weight']
 
         # Базовые параметры LightGBM
         base_params = {

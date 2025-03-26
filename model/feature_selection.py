@@ -34,11 +34,42 @@ def analyze_correlations(X: pd.DataFrame, threshold: float = 0.9) -> Tuple[pd.Da
 
     logger.info(f"Найдено {len(to_drop)} сильно коррелирующих признаков для удаления")
 
+    if to_drop:
+        logger.info(f"Список удаляемых признаков: {', '.join(to_drop)}")
+        correlations_log = []
+
+        # Проходим по всем колонкам, которые нужно удалить
+        for i, col1 in enumerate(to_drop):
+            # Для каждой такой колонки находим все другие колонки, с которыми она коррелирует выше порога
+            for col2 in X.columns:
+                # Берем только верхний треугольник матрицы корреляций, чтобы не учитывать повторения
+                if col1 != col2:
+                    corr_value = corr_matrix.loc[col1, col2]
+                    # Преобразуем в скаляр, если это не скаляр
+                    if hasattr(corr_value, 'iloc'):
+                        corr_value = corr_value.iloc[0]
+                    elif hasattr(corr_value, 'item'):
+                        corr_value = corr_value.item()
+
+                    # Если корреляция выше порога, записываем информацию
+                    if corr_value > threshold:
+                        correlations_log.append((col1, col2, corr_value))
+
+        # Группируем по первой колонке, чтобы вывести корреляции для каждого удаляемого признака
+        from collections import defaultdict
+        grouped_correlations = defaultdict(list)
+        for col1, col2, corr_value in correlations_log:
+            grouped_correlations[col1].append((col2, corr_value))
+
+        for col, corrs in grouped_correlations.items():
+            corr_details = [f"{col2} ({corr_value:.4f})" for col2, corr_value in corrs]
+            if corr_details:
+                logger.info(f"Признак '{col}' коррелирует с: {', '.join(corr_details)}")
+
     # Удаление сильно коррелирующих признаков
     X_reduced = X.drop(to_drop, axis=1)
 
     return X_reduced, to_drop
-
 
 def select_features_from_model(
         X_train_val: pd.DataFrame,
@@ -128,7 +159,10 @@ def group_features(X: pd.DataFrame) -> Dict[str, List[str]]:
         'clip': 'clip_emb_',
         'emotional': 'emotion_|emotional_',
         'structural': 'tweet_type_|has_image|has_quoted_text',
-        'temporal': 'hour|day_of_week|is_weekend'
+        'temporal': 'hour|day_of_week|is_weekend',
+        'emotional_tone': '^EM\d+$|eid',
+        'speech_stylistics': '^SS\d+$',
+        'content_topics': '^CT\d+$'
     }
 
     # Группировка столбцов на основе шаблонов

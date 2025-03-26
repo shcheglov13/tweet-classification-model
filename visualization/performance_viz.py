@@ -8,7 +8,7 @@ import logging
 
 from sklearn.calibration import calibration_curve
 from sklearn.model_selection import learning_curve, StratifiedKFold
-from typing import Any
+from typing import Any, Optional, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -144,29 +144,28 @@ def visualize_learning_curve(
         y_train: pd.Series,
         cv: int = 5,
         output_path: str = 'learning_curve.png',
-        random_state: int = 42) -> None:
+        random_state: int = 42,
+        final_params: Optional[Dict] = None) -> None:
     """
-    Визуализация кривой обучения
+    Визуализация кривой обучения с использованием оптимальных параметров модели
 
     Args:
-        estimator: Модель для обучения
+        estimator: Базовая модель для создания клона с оптимальными параметрами
         X_train: DataFrame с признаками обучающей выборки
         y_train: Серия целевых значений обучающей выборки
         cv: Количество фолдов для кросс-валидации
         output_path: Путь для сохранения изображения
         random_state: Seed для воспроизводимости результатов
+        final_params: Словарь с оптимальными параметрами модели
     """
+    logger.info("Визуализация кривой обучения с F1-метрикой")
+
     # Проверка наличия обоих классов
     class_counts = y_train.value_counts()
-    logger.info(f"Визуализация кривой обучения. Распределение классов: {class_counts.to_dict()}")
-
-    if len(class_counts) < 2 or 1 not in class_counts or 0 not in class_counts:
-        logger.error(f"ОШИБКА! В данных отсутствует один из классов: {class_counts.to_dict()}")
-        logger.error("Невозможно построить кривую обучения с метрикой F1")
-
-        # Создаем пустое изображение с сообщением об ошибке
+    if len(class_counts) < 2 or min(class_counts.values) < 3:
+        logger.error(f"Недостаточно данных для F1-метрики: {class_counts.to_dict()}")
         plt.figure(figsize=(10, 6))
-        plt.text(0.5, 0.5, 'Ошибка: невозможно построить кривую обучения.\nВ данных отсутствует один из классов.',
+        plt.text(0.5, 0.5, 'Ошибка: недостаточно данных для построения F1-кривой обучения',
                  horizontalalignment='center', verticalalignment='center', fontsize=12)
         plt.axis('off')
         plt.savefig(output_path)
@@ -174,47 +173,28 @@ def visualize_learning_curve(
         return
 
     try:
-        # Расчет кривой обучения с настройкой метрики
-        # Используем accuracy вместо f1, если в данных мало примеров положительного класса
-        if class_counts.get(1, 0) < 5:
-            logger.warning(
-                f"Мало примеров положительного класса ({class_counts.get(1, 0)}). Используем метрику accuracy.")
-            scoring = 'accuracy'
-        else:
-            scoring = 'f1'
+        # Создание клона модели с оптимальными параметрами
+        model_params = final_params.copy() if final_params else {}
+        # Удаляем служебные параметры
+        for param in ['random_state', 'verbose']:
+            if param in model_params:
+                del model_params[param]
 
-        logger.info(f"Расчет кривой обучения с метрикой: {scoring}")
+        # Добавляем random_state для воспроизводимости
+        model_params['random_state'] = random_state
+        for key, value in model_params.items():
+            setattr(estimator, key, value)
 
+        # Определение стратегии кросс-валидации
         stratified_kfold = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
 
-        # Проверка всех фолдов на представленность классов
-        fold_issues = []
-        for i, (train_idx, test_idx) in enumerate(stratified_kfold.split(X_train, y_train)):
-            y_train_fold = y_train.iloc[train_idx]
-            y_test_fold = y_train.iloc[test_idx]
-
-            # Проверка наличия всех классов в обучающей и тестовой выборках
-            if len(y_train_fold.unique()) < 2:
-                fold_issues.append(f"Фолд {i+1}: в обучающей выборке отсутствует один из классов: {set(y_train_fold.unique())}")
-            if len(y_test_fold.unique()) < 2:
-                fold_issues.append(f"Фолд {i+1}: в тестовой выборке отсутствует один из классов: {set(y_test_fold.unique())}")
-
-        # Если есть проблемы с представленностью классов в фолдах
-        if fold_issues:
-            for issue in fold_issues:
-                logger.warning(issue)
-            logger.info("Попытка использования альтернативной стратегии с принудительной стратификацией")
-
-            # Используем более надежную стратегию для очень несбалансированных данных
-            # Из библиотеки imblearn или просто используем accuracy метрику
-            if scoring == 'f1':
-                logger.info("Переключаемся на метрику accuracy из-за проблем со стратификацией")
-                scoring = 'accuracy'
-
-        train_sizes, train_scores, test_scores = learning_curve(
+        # Расчет кривой обучения с F1-метрикой
+        train_sizes = np.linspace(0.1, 1.0, 15)  # Увеличиваем число точек для более гладкой кривой
+        train_sizes_abs, train_scores, test_scores = learning_curve(
             estimator, X_train, y_train, cv=stratified_kfold, n_jobs=-1,
-            train_sizes=np.linspace(0.1, 1.0, 10),
-            scoring=scoring
+            train_sizes=train_sizes,
+            scoring='f1',
+            random_state=random_state
         )
 
         # Расчет среднего и стандартного отклонения
@@ -223,24 +203,102 @@ def visualize_learning_curve(
         test_mean = np.mean(test_scores, axis=1)
         test_std = np.std(test_scores, axis=1)
 
-        # Построение кривой обучения
-        plt.figure(figsize=(10, 6))
-        plt.plot(train_sizes, train_mean, color='blue', marker='o', markersize=5, label='Оценка на обучающей выборке')
-        plt.fill_between(train_sizes, train_mean + train_std, train_mean - train_std, alpha=0.15, color='blue')
-        plt.plot(train_sizes, test_mean, color='green', marker='s', markersize=5, label='Оценка на кросс-валидации')
-        plt.fill_between(train_sizes, test_mean + test_std, test_mean - test_std, alpha=0.15, color='green')
-        plt.xlabel('Количество обучающих примеров')
-        plt.ylabel(f'Метрика: {scoring}')
-        plt.title('Кривая обучения')
-        plt.legend(loc='lower right')
-        plt.grid(True, alpha=0.3)
-        plt.savefig(output_path)
-        plt.close()
+        # Установка стиля
+        with plt.style.context('seaborn-v0_8-whitegrid'):
+            fig, ax = plt.subplots(figsize=(12, 8))
 
+            # Главные кривые обучения
+            ax.plot(train_sizes_abs, train_mean, 'o-', color='#1f77b4', linewidth=2.5,
+                    markersize=8, label='Обучающая выборка')
+            ax.fill_between(train_sizes_abs, train_mean - train_std, train_mean + train_std,
+                            alpha=0.2, color='#1f77b4')
+
+            ax.plot(train_sizes_abs, test_mean, 's-', color='#ff7f0e', linewidth=2.5,
+                    markersize=8, label='Кросс-валидация')
+            ax.fill_between(train_sizes_abs, test_mean - test_std, test_mean + test_std,
+                            alpha=0.2, color='#ff7f0e')
+
+            # Базовая линия (случайная модель для бинарной классификации)
+            positive_class_ratio = y_train.mean()
+            baseline_f1 = 2 * positive_class_ratio / (1 + positive_class_ratio)
+            ax.axhline(y=baseline_f1, color='#d62728', linestyle='--', linewidth=1.5, alpha=0.8,
+                       label=f'Базовая линия (F1={baseline_f1:.3f})')
+
+            # Разрыв между кривыми (overfitting gap)
+            for i in range(len(train_sizes_abs)):
+                if i % 3 == 0 or i == len(train_sizes_abs) - 1:  # Рисуем не все линии для ясности
+                    gap = train_mean[i] - test_mean[i]
+                    ax.plot([train_sizes_abs[i], train_sizes_abs[i]],
+                            [test_mean[i], train_mean[i]], 'k--', alpha=0.3, linewidth=1)
+                    if gap > 0.1:  # Показываем метку только для существенных разрывов
+                        ax.text(train_sizes_abs[i], test_mean[i] + gap / 2, f'{gap:.2f}',
+                                horizontalalignment='left', fontsize=8)
+
+            # Добавляем обозначение последней точки (максимальное количество примеров)
+            final_gap = train_mean[-1] - test_mean[-1]
+            ax.scatter(train_sizes_abs[-1], train_mean[-1], s=100, c='#1f77b4', zorder=5,
+                       edgecolor='black', linewidth=1.5)
+            ax.scatter(train_sizes_abs[-1], test_mean[-1], s=100, c='#ff7f0e', zorder=5,
+                       edgecolor='black', linewidth=1.5)
+
+            # Аннотации для последних точек
+            ax.annotate(f'F1={train_mean[-1]:.3f}±{train_std[-1]:.3f}',
+                        xy=(train_sizes_abs[-1], train_mean[-1]),
+                        xytext=(10, 10), textcoords='offset points',
+                        arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=.2'))
+
+            ax.annotate(f'F1={test_mean[-1]:.3f}±{test_std[-1]:.3f}',
+                        xy=(train_sizes_abs[-1], test_mean[-1]),
+                        xytext=(10, -20), textcoords='offset points',
+                        arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=.2'))
+
+            # Оформление графика
+            ax.set_xlabel('Количество обучающих примеров', fontsize=14)
+            ax.set_ylabel('F1-метрика', fontsize=14)
+            ax.set_title('Кривая обучения', fontsize=16)
+
+            # Добавляем информацию о модели в виде текстового блока
+            param_text = []
+            if final_params:
+                important_params = ['num_leaves', 'learning_rate', 'max_depth', 'lambda_l1', 'lambda_l2']
+                for param in important_params:
+                    if param in final_params:
+                        param_text.append(f"{param}: {final_params[param]}")
+
+            param_info = '\n'.join(param_text[:5])  # Ограничиваем количество параметров для читаемости
+
+            # Информация о данных и модели
+            plt.figtext(0.02, 0.02,
+                        f"Данные: {len(X_train)} примеров, {X_train.shape[1]} признаков\n"
+                        f"Баланс классов: {class_counts.get(1, 0)}/{class_counts.get(0, 0)}\n"
+                        f"Параметры модели:\n{param_info}",
+                        fontsize=10, bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.5'))
+
+            # Легенда и сетка
+            ax.legend(loc='lower right', fontsize=12)
+            ax.grid(True, alpha=0.3)
+
+            # Улучшенные отметки осей
+            ax.tick_params(axis='both', which='major', labelsize=12)
+
+            # Добавляем информацию об overfitting
+            final_gap_text = (f"Разрыв Train-Val: {final_gap:.3f} "
+                              f"({'Высокий' if final_gap > 0.25 else 'Средний' if final_gap > 0.1 else 'Низкий'} уровень переобучения)")
+            plt.figtext(0.5, 0.01, final_gap_text, fontsize=12, ha='center',
+                        bbox=dict(facecolor='lightyellow', alpha=0.8, boxstyle='round,pad=0.5'))
+
+            plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+        # Логируем финальные метрики
         logger.info(f"Кривая обучения сохранена в '{output_path}'")
+        logger.info(f"Финальный F1 на обучающей выборке: {train_mean[-1]:.4f}±{train_std[-1]:.4f}")
+        logger.info(f"Финальный F1 на валидации: {test_mean[-1]:.4f}±{test_std[-1]:.4f}")
+        logger.info(f"Разрыв между обучающим и валидационным F1: {final_gap:.4f}")
+
     except Exception as e:
         logger.error(f"Ошибка при создании кривой обучения: {e}")
-        # Создаем пустое изображение с сообщением об ошибке
         plt.figure(figsize=(10, 6))
         plt.text(0.5, 0.5, f'Ошибка: {str(e)}',
                  horizontalalignment='center', verticalalignment='center', fontsize=12)

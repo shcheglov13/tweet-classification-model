@@ -10,6 +10,7 @@ from .text_features import TextFeatureExtractor
 from .visual_features import VisualFeatureExtractor
 from .emotional_features import EmotionalFeatureExtractor
 from .structural_features import StructuralFeatureExtractor
+from .attributes_features import AttributesFeatureExtractor
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,6 +30,7 @@ class FeatureExtractor:
         visual_extractor: Экстрактор визуальных признаков
         emotional_extractor: Экстрактор эмоциональных признаков
         structural_extractor: Экстрактор структурных признаков
+        attributes_extractor: Экстрактор признаков атрибутов
     """
 
     def __init__(self, device=None, cache_dir=CACHE_DIR):
@@ -69,6 +71,12 @@ class FeatureExtractor:
             cache_dir=self.cache_dir,
             bertweet_tokenizer=self.text_extractor.bertweet_tokenizer,
             bertweet_model=self.text_extractor.bertweet_model
+        )
+
+        # Инициализация экстрактора признаков атрибутов
+        self.attributes_extractor = AttributesFeatureExtractor(
+            device=self.device,
+            cache_dir=self.cache_dir
         )
 
     def extract_all_features(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, List[int]]:
@@ -119,6 +127,11 @@ class FeatureExtractor:
         logger.info("Извлечение структурных признаков...")
         structural_features = self.structural_extractor.extract(df)
         features_df = pd.concat([features_df, structural_features], axis=1)
+
+        # 5. Извлечение признаков атрибутов
+        logger.info("Извлечение признаков атрибутов...")
+        attributes_features = self.attributes_extractor.extract(df)
+        features_df = pd.concat([features_df, attributes_features], axis=1)
 
         # Сохранение признаков в кеш
         features_df.to_pickle(cache_file)
