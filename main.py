@@ -86,7 +86,7 @@ def train_tokenizator_model(
 
         # 5. Удаление сильно коррелирующих признаков
         logger.info("Удаление сильно коррелирующих признаков...")
-        X_reduced, dropped_features = model.analyze_feature_correlations(X, threshold=0.9)
+        X_reduced, dropped_features = model.analyze_feature_correlations(X, threshold=0.8)
 
         # 6. Группировка признаков по типу
         logger.info("Группировка признаков по типу...")
@@ -190,13 +190,9 @@ def train_tokenizator_model(
 
         # 23. Визуализация кривой обучения
         logger.info("Визуализация кривой обучения...")
-        lgb_model = lightgbm.LGBMClassifier(
-            random_state=random_state
-        )
-
-        # Передаем весь сбалансированный датасет для визуализации кривой обучения
+        final_params = model.best_params.copy()
         visualize_learning_curve(
-            lgb_model,
+            lightgbm.LGBMClassifier(**final_params),
             X_train_val_selected,
             y_train_val_balanced,
             cv=n_splits,
