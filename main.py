@@ -9,6 +9,7 @@ from typing import Tuple
 import lightgbm
 import pandas as pd
 
+import config
 from data_loader import load_data
 from feature_extraction.feature_manager import FeatureExtractor
 from model.tokenizator_model import TokenizatorModel
@@ -86,7 +87,7 @@ def train_tokenizator_model(
 
         # 5. Удаление сильно коррелирующих признаков
         logger.info("Удаление сильно коррелирующих признаков...")
-        X_reduced, dropped_features = model.analyze_feature_correlations(X, threshold=0.8)
+        X_reduced, dropped_features = model.analyze_feature_correlations(X, threshold=config.CORRELATION_THRESHOLD)
 
         # 6. Группировка признаков по типу
         logger.info("Группировка признаков по типу...")

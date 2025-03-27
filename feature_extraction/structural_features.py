@@ -1,6 +1,8 @@
 """Модуль для извлечения структурных признаков из твитов"""
 
 import os
+import re
+
 import numpy as np
 import pandas as pd
 import torch
@@ -100,8 +102,21 @@ class StructuralFeatureExtractor(BaseExtractor):
         for col in tweet_types.columns:
             structural_df[col] = tweet_types[col]
 
-        # Наличие изображения
-        structural_df['has_image'] = df['image_url'].notna() & (df['image_url'] != "")
+        # Определение типа медиа (one-hot кодирование)
+        # Преобразование всех URL в строки, заменяя NaN на пустые строки
+        image_urls = df['image_url'].fillna("").astype(str)
+
+        # Признак наличия изображения
+        has_image = image_urls != ""
+
+        # Видео ссылки содержат "video" или "thumb" в пути
+        video_pattern = re.compile(r'(video|tweet_video|amplify_video|video_thumb)', re.IGNORECASE)
+        is_video = image_urls.apply(lambda url: bool(video_pattern.search(url)))
+
+        # Тип медиа
+        structural_df['media_type_only_text'] = ~has_image
+        structural_df['media_type_video'] = has_image & is_video
+        structural_df['media_type_image'] = has_image & ~is_video
 
         # Наличие цитируемого текста
         structural_df['has_quoted_text'] = df['quoted_text'].notna() & (df['quoted_text'] != "")

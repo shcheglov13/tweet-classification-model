@@ -291,7 +291,6 @@ def visualize_learning_curve(
             plt.savefig(output_path, dpi=300, bbox_inches='tight')
             plt.close()
 
-        # Логируем финальные метрики
         logger.info(f"Кривая обучения сохранена в '{output_path}'")
         logger.info(f"Финальный F1 на обучающей выборке: {train_mean[-1]:.4f}±{train_std[-1]:.4f}")
         logger.info(f"Финальный F1 на валидации: {test_mean[-1]:.4f}±{test_std[-1]:.4f}")

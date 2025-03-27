@@ -1,5 +1,3 @@
-"""Конфигурационный файл для проекта Tokenizator"""
-
 import os
 
 # Пути к директориям
@@ -29,6 +27,7 @@ MAX_TEXT_LENGTH = 128
 BATCH_SIZE = 32
 TEXT_PCA_COMPONENTS = 45
 IMAGE_PCA_COMPONENTS = 60
+CORRELATION_THRESHOLD = 0.8
 
 # Создание необходимых директорий
 for dir_path in [CACHE_DIR, IMAGE_CACHE_DIR, MODELS_DIR, PLOTS_DIR]:
