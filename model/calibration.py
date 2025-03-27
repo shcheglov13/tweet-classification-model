@@ -1,9 +1,9 @@
 """Функции для калибровки вероятностей модели"""
 
+import os
 import numpy as np
 import pandas as pd
 import logging
-import os
 from typing import Tuple, Dict, Any, Optional
 
 from sklearn.calibration import CalibratedClassifierCV
@@ -35,7 +35,7 @@ class PlattCalibrator:
         Обучение калибратора вероятностей
 
         Args:
-            model: Обученная модель LightGBM
+            model: Обученная модель LGBMClassifier
             X_calibration: DataFrame с признаками для калибровки
             y_calibration: Серия целевых значений для калибровки
             method: Метод калибровки ('sigmoid' для Platt scaling)
@@ -68,6 +68,7 @@ class PlattCalibrator:
 
         return self.calibrated_classifier.predict_proba(X)[:, 1]
 
+
 def calibrate_model(model: Any, X: pd.DataFrame, y: pd.Series,
                     test_size: float = 0.3, random_state: int = 42,
                     calibration_method: str = 'sigmoid', cv: int = 5,
@@ -87,7 +88,7 @@ def calibrate_model(model: Any, X: pd.DataFrame, y: pd.Series,
     calibrator.fit(model, X_calib, y_calib, method=calibration_method, cv=cv)
 
     # Получение предсказаний до и после калибровки
-    y_pred_proba_before = model.predict(X_test_calib)
+    y_pred_proba_before = model.predict_proba(X_test_calib)[:, 1]
     y_pred_proba_after = calibrator.predict_proba(X_test_calib)
 
     # Визуализация кривой калибровки, если указана директория

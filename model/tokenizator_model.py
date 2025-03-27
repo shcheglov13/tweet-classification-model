@@ -430,23 +430,17 @@ class TokenizatorModel:
         # Сохранение имен признаков
         self.feature_names = X_train_val.columns.tolist()
 
-        # Создание датасета для обучения
-        train_data = lgb.Dataset(X_train_val, label=y_train_val, feature_name=self.feature_names)
-
-        # Обучение модели без валидационного набора
-        final_model = lgb.train(
-            params,
-            train_data,
-            num_boost_round=1000
-        )
+        # Создание и обучение LGBMClassifier
+        lgbm_classifier = lgb.LGBMClassifier(**params)
+        lgbm_classifier.fit(X_train_val, y_train_val)
 
         # Сохранение финальной модели
-        self.model = final_model
+        self.model = lgbm_classifier
 
         # Расчет важности признаков
         self.feature_importance = pd.DataFrame({
             'feature': self.feature_names,
-            'importance': self.model.feature_importance(importance_type='gain')
+            'importance': self.model.feature_importances_
         }).sort_values('importance', ascending=False)
 
         logger.info(f"Финальная модель обучена на {len(X_train_val)} примерах с {len(self.feature_names)} признаками")
@@ -1349,5 +1343,6 @@ class TokenizatorModel:
             y_pred = (y_pred_proba > threshold).astype(int)
             return y_pred, y_pred_proba
         else:
-           # Если нет калибратора, используем стандартный predict
-           return predict(self.model, X_pred, threshold)
+            y_pred_proba = self.model.predict_proba(X_pred)[:, 1]
+            y_pred = (y_pred_proba > threshold).astype(int)
+            return y_pred, y_pred_proba

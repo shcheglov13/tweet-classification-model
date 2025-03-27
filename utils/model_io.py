@@ -4,7 +4,6 @@ import os
 import pickle
 import logging
 import pandas as pd
-import lightgbm as lgb
 from typing import Dict, List, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -25,7 +24,7 @@ def save_model(model: Any,
     Сохраняет модель и связанные с ней объекты
 
     Args:
-        model: Обученная модель LightGBM
+        model: Обученная модель LGBMClassifier
         filepath: Путь для сохранения модели
         best_threshold: Оптимальный порог для модели
         feature_names: Имена признаков
@@ -46,8 +45,9 @@ def save_model(model: Any,
         if model_dir and not os.path.exists(model_dir):
             os.makedirs(model_dir)
 
-        # Сохранение модели LightGBM
-        model.save_model(filepath)
+        # Сохранение модели LGBMClassifier
+        with open(filepath, 'wb') as f:
+            pickle.dump(model, f)
 
         # Сохранение дополнительной информации о модели
         model_info = {
@@ -96,12 +96,14 @@ def load_model(filepath: str) -> Tuple[Any, Dict, Any, Optional[pd.DataFrame], O
         Tuple: (модель, информация о модели, масштабировщик, важность признаков, калибратор)
     """
     try:
-        # Загрузка модели LightGBM
+        # Загрузка модели LGBMClassifier
         if not os.path.exists(filepath):
             logger.error(f"Файл модели {filepath} не найден")
             return None, {}, None, None, None
 
-        model = lgb.Booster(model_file=filepath)
+        with open(filepath, 'rb') as f:
+            model = pickle.load(f)
+
         model_info = {}
         scaler = None
         feature_importance = None

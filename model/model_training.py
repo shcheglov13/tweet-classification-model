@@ -61,7 +61,7 @@ def train_model(
         params: Optional[Dict] = None,
         feature_names: Optional[List[str]] = None,
         threshold: float = 0.5,
-        optimization_metric: str = 'pr_auc') -> Tuple[lgb.Booster, pd.DataFrame, Dict]:
+        optimization_metric: str = 'pr_auc') -> Tuple[lgb.LGBMClassifier, pd.DataFrame, Dict]:
     """
     Обучение модели LightGBM с использованием кросс-валидации
 
@@ -75,7 +75,7 @@ def train_model(
         optimization_metric: Метрика для оптимизации
 
     Returns:
-        Tuple[lgb.Booster, pd.DataFrame, Dict]: Лучшая модель, важность признаков, результаты по фолдам
+        Tuple[lgb.LGBMClassifier, pd.DataFrame, Dict]: Лучшая модель, важность признаков, результаты по фолдам
     """
     logger.info(f"Обучение модели LightGBM с кросс-валидацией, порогом {threshold} и метрикой {optimization_metric}")
 
@@ -95,13 +95,15 @@ def train_model(
             'lambda_l2': 0.1,
             'min_child_samples': 20,
             'max_depth': 8,
-            'random_state': 42,
-            'device': 'gpu',
-            'gpu_platform_id': 0,
-            'gpu_device_id': 0,
-            'gpu_use_dp': False,
-            'max_bin': 63
+            'random_state': 42
         }
+
+        # Добавим GPU параметры только если они были в исходных params
+        gpu_params = {'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0,
+                     'gpu_use_dp': False, 'max_bin': 63}
+        for key, value in gpu_params.items():
+            if key in params:
+                params[key] = value
 
     # Использование имен признаков, если предоставлены
     if feature_names is None:
@@ -123,35 +125,32 @@ def train_model(
         X_val_fold = X_train_val.iloc[val_idx]
         y_val_fold = y_train_val.iloc[val_idx]
 
-        # Создание объектов датасета
-        train_data = lgb.Dataset(X_train_fold, label=y_train_fold, feature_name=feature_names)
-        val_data = lgb.Dataset(X_val_fold, label=y_val_fold, feature_name=feature_names, reference=train_data)
+        # Создание и обучение модели LGBMClassifier
+        fold_params = params.copy()
+        fold_params['early_stopping_rounds'] = 50
+        fold_params['verbose'] = -1
 
-        # Обучение модели
-        callbacks = [
-            lgb.early_stopping(50)
-        ]
+        model = lgb.LGBMClassifier(**fold_params)
 
-        model = lgb.train(
-            params,
-            train_data,
-            valid_sets=[train_data, val_data],
-            valid_names=['train', 'valid'],
-            num_boost_round=1000,
-            callbacks=callbacks
+        # Обучение с ранней остановкой
+        model.fit(
+            X_train_fold, y_train_fold,
+            eval_set=[(X_train_fold, y_train_fold), (X_val_fold, y_val_fold)],
+            eval_names=['train', 'valid'],
+            eval_metric='binary_logloss'
         )
 
         # Получение важности признаков для текущего фолда
         fold_importance = pd.DataFrame({
             'feature': feature_names,
-            'importance': model.feature_importance(importance_type='gain')
+            'importance': model.feature_importances_
         })
 
         # Обновление общей важности признаков
         combined_importance['importance'] += fold_importance['importance'] / kfold.n_splits
 
         # Оценка модели на валидационной выборке
-        y_pred_proba = model.predict(X_val_fold)
+        y_pred_proba = model.predict_proba(X_val_fold)[:, 1]
         y_pred_binary = (y_pred_proba > threshold).astype(int)
 
         # Расчет метрик с использованием переданного порога
@@ -225,7 +224,7 @@ def find_optimal_threshold(
         y_pred_proba = calibrator.predict_proba(X_val)
         logger.info("Используем калиброванные вероятности для поиска порога")
     else:
-        y_pred_proba = model.predict(X_val)
+        y_pred_proba = model.predict_proba(X_val)[:, 1]
         logger.info("Используем некалиброванные вероятности для поиска порога")
 
     # Поиск оптимального порога с использованием выбранной метрики
@@ -257,7 +256,7 @@ def find_optimal_threshold(
     return best_threshold
 
 
-def predict(model: lgb.Booster, X: pd.DataFrame, threshold: float = 0.5) -> Tuple[np.ndarray, np.ndarray]:
+def predict(model: lgb.LGBMClassifier, X: pd.DataFrame, threshold: float = 0.5) -> Tuple[np.ndarray, np.ndarray]:
     """
     Предсказание на основе модели LightGBM
 
@@ -271,8 +270,7 @@ def predict(model: lgb.Booster, X: pd.DataFrame, threshold: float = 0.5) -> Tupl
     """
     logger.info(f"Выполнение предсказаний с порогом {threshold}")
 
-    # Получение предсказаний
-    y_pred_proba = model.predict(X)
+    y_pred_proba = model.predict_proba(X)[:, 1]
     y_pred = (y_pred_proba > threshold).astype(int)
 
     return y_pred, y_pred_proba

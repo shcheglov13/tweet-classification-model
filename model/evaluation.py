@@ -12,13 +12,13 @@ import lightgbm as lgb
 logger = logging.getLogger(__name__)
 
 
-def evaluate_model(model: lgb.Booster, X: pd.DataFrame, y: pd.Series, threshold: float = 0.5,
+def evaluate_model(model: lgb.LGBMClassifier, X: pd.DataFrame, y: pd.Series, threshold: float = 0.5,
                    calibrator: Optional[Any] = None) -> Dict:
     """
     Оценка модели на заданных данных
 
     Args:
-        model: Обученная модель LightGBM
+        model: Обученная модель LGBMClassifier
         X: DataFrame с признаками
         y: Серия целевых значений
         threshold: Порог классификации
@@ -30,7 +30,7 @@ def evaluate_model(model: lgb.Booster, X: pd.DataFrame, y: pd.Series, threshold:
     logger.info(f"Оценка модели с порогом {threshold}")
 
     # Получение предсказаний
-    y_pred_proba = model.predict(X)
+    y_pred_proba = model.predict_proba(X)[:, 1]
 
     # Применение калибровки, если калибратор предоставлен
     if calibrator is not None and hasattr(calibrator, 'is_calibrated') and calibrator.is_calibrated:
@@ -38,8 +38,8 @@ def evaluate_model(model: lgb.Booster, X: pd.DataFrame, y: pd.Series, threshold:
         y_pred_proba_calibrated = calibrator.predict_proba(X)
         y_pred = (y_pred_proba_calibrated > threshold).astype(int)
     else:
-        y_pred = (y_pred_proba > threshold).astype(int)
         y_pred_proba_calibrated = None
+        y_pred = (y_pred_proba > threshold).astype(int)
 
     # Расчет метрик
     accuracy = accuracy_score(y, y_pred)
