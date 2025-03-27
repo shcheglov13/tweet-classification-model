@@ -10,6 +10,8 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import brier_score_loss, log_loss
 
+from visualization.performance_viz import visualize_calibration
+
 logger = logging.getLogger(__name__)
 
 
