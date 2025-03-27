@@ -38,6 +38,7 @@ def evaluate_model(model: lgb.LGBMClassifier, X: pd.DataFrame, y: pd.Series, thr
         y_pred_proba_calibrated = calibrator.predict_proba(X)
         y_pred = (y_pred_proba_calibrated > threshold).astype(int)
     else:
+        logger.warning("Калибратор не предоставлен для оценки")
         y_pred_proba_calibrated = None
         y_pred = (y_pred_proba > threshold).astype(int)
 

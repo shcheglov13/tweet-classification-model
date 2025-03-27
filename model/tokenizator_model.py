@@ -1174,8 +1174,10 @@ class TokenizatorModel:
 
         logger.info(f"Оценка модели с порогом {threshold}")
 
-        # Вызов функции оценки модели
-        metrics = evaluate_model(self.model, X, y, threshold)
+        metrics = evaluate_model(
+            self.model, X, y, threshold,
+            calibrator=self.calibrator if hasattr(self, 'calibrator') and self.calibrator.is_calibrated else None
+        )
 
         # Сохранение метрик для дальнейшего использования
         self.model_metrics = metrics
