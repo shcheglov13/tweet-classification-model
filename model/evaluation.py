@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict
+from typing import Dict, Optional, Any
 from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
                              roc_auc_score, precision_recall_curve, auc,
                              confusion_matrix, classification_report)
@@ -12,7 +12,8 @@ import lightgbm as lgb
 logger = logging.getLogger(__name__)
 
 
-def evaluate_model(model: lgb.Booster, X: pd.DataFrame, y: pd.Series, threshold: float = 0.5) -> Dict:
+def evaluate_model(model: lgb.Booster, X: pd.DataFrame, y: pd.Series, threshold: float = 0.5,
+                   calibrator: Optional[Any] = None) -> Dict:
     """
     Оценка модели на заданных данных
 
@@ -21,6 +22,7 @@ def evaluate_model(model: lgb.Booster, X: pd.DataFrame, y: pd.Series, threshold:
         X: DataFrame с признаками
         y: Серия целевых значений
         threshold: Порог классификации
+        calibrator: Объект калибратора вероятностей (опционально)
 
     Returns:
         Dict: Словарь с метриками производительности
@@ -29,7 +31,15 @@ def evaluate_model(model: lgb.Booster, X: pd.DataFrame, y: pd.Series, threshold:
 
     # Получение предсказаний
     y_pred_proba = model.predict(X)
-    y_pred = (y_pred_proba > threshold).astype(int)
+
+    # Применение калибровки, если калибратор предоставлен
+    if calibrator is not None and hasattr(calibrator, 'is_calibrated') and calibrator.is_calibrated:
+        logger.info("Применение калибровки вероятностей для оценки")
+        y_pred_proba_calibrated = calibrator.predict_proba(X)
+        y_pred = (y_pred_proba_calibrated > threshold).astype(int)
+    else:
+        y_pred = (y_pred_proba > threshold).astype(int)
+        y_pred_proba_calibrated = None
 
     # Расчет метрик
     accuracy = accuracy_score(y, y_pred)
@@ -69,7 +79,8 @@ def evaluate_model(model: lgb.Booster, X: pd.DataFrame, y: pd.Series, threshold:
         'confusion_matrix': conf_mat,
         'classification_report': class_report,
         'y_pred': y_pred,
-        'y_pred_proba': y_pred_proba
+        'y_pred_proba': y_pred_proba,
+        'y_pred_proba_calibrated': y_pred_proba_calibrated
     }
 
     return metrics

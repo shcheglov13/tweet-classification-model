@@ -18,7 +18,9 @@ def save_model(model: Any,
                feature_groups: Optional[Dict] = None,
                model_metrics: Optional[Dict] = None,
                scaler: Any = None,
-               feature_importance: Optional[pd.DataFrame] = None) -> bool:
+               feature_importance: Optional[pd.DataFrame] = None,
+               calibrator: Any = None,
+               additional_info: Optional[Dict] = None) -> bool:
     """
     Сохраняет модель и связанные с ней объекты
 
@@ -32,6 +34,8 @@ def save_model(model: Any,
         model_metrics: Метрики модели
         scaler: Масштабировщик признаков
         feature_importance: DataFrame с важностью признаков
+        calibrator: Калибратор вероятностей
+        additional_info: Дополнительная информация о модели
 
     Returns:
         bool: Статус успешного сохранения
@@ -51,7 +55,8 @@ def save_model(model: Any,
             'feature_names': feature_names,
             'selected_features': selected_features,
             'feature_groups': feature_groups,
-            'model_metrics': model_metrics
+            'model_metrics': model_metrics,
+            'additional_info': additional_info or {}
         }
 
         with open(f"{filepath.replace('.txt', '')}_info.pkl", 'wb') as f:
@@ -66,6 +71,12 @@ def save_model(model: Any,
         if feature_importance is not None:
             feature_importance.to_csv(f"{filepath.replace('.txt', '')}_importance.csv", index=False)
 
+        # Сохранение калибратора
+        if calibrator is not None:
+            with open(f"{filepath.replace('.txt', '')}_calibrator.pkl", 'wb') as f:
+                pickle.dump(calibrator, f)
+            logger.info("Сохранен калибратор вероятностей")
+
         logger.info(f"Модель и связанные объекты сохранены в {filepath} и связанных файлах")
 
         return True
@@ -74,7 +85,7 @@ def save_model(model: Any,
         return False
 
 
-def load_model(filepath: str) -> Tuple[Any, Dict, Any, Optional[pd.DataFrame]]:
+def load_model(filepath: str) -> Tuple[Any, Dict, Any, Optional[pd.DataFrame], Optional[Any]]:
     """
     Загружает модель и связанные с ней объекты
 
@@ -82,18 +93,19 @@ def load_model(filepath: str) -> Tuple[Any, Dict, Any, Optional[pd.DataFrame]]:
         filepath: Путь к сохраненной модели
 
     Returns:
-        Tuple: (модель, информация о модели, масштабировщик, важность признаков)
+        Tuple: (модель, информация о модели, масштабировщик, важность признаков, калибратор)
     """
     try:
         # Загрузка модели LightGBM
         if not os.path.exists(filepath):
             logger.error(f"Файл модели {filepath} не найден")
-            return None, {}, None, None
+            return None, {}, None, None, None
 
         model = lgb.Booster(model_file=filepath)
         model_info = {}
         scaler = None
         feature_importance = None
+        calibrator = None
 
         # Загрузка дополнительной информации о модели
         info_filepath = f"{filepath.replace('.txt', '')}_info.pkl"
@@ -112,9 +124,16 @@ def load_model(filepath: str) -> Tuple[Any, Dict, Any, Optional[pd.DataFrame]]:
         if os.path.exists(importance_filepath):
             feature_importance = pd.read_csv(importance_filepath)
 
+        # Загрузка калибратора, если доступно
+        calibrator_filepath = f"{filepath.replace('.txt', '')}_calibrator.pkl"
+        if os.path.exists(calibrator_filepath):
+            with open(calibrator_filepath, 'rb') as f:
+                calibrator = pickle.load(f)
+            logger.info("Загружен калибратор вероятностей")
+
         logger.info(f"Модель и связанные объекты загружены из {filepath} и связанных файлов")
 
-        return model, model_info, scaler, feature_importance
+        return model, model_info, scaler, feature_importance, calibrator
     except Exception as e:
         logger.error(f"Ошибка загрузки модели: {e}")
-        return None, {}, None, None
+        return None, {}, None, None, None

@@ -8,6 +8,7 @@ import mlflow
 from typing import Tuple
 import lightgbm
 import pandas as pd
+from sklearn.model_selection import train_test_split
 
 import config
 from data_loader import load_data
@@ -16,7 +17,8 @@ from model.tokenizator_model import TokenizatorModel
 from visualization.feature_viz import visualize_feature_importance
 from visualization.performance_viz import (visualize_confusion_matrix, visualize_roc_curve,
                                            visualize_pr_curve, visualize_calibration_curve,
-                                           visualize_learning_curve, visualize_lift)
+                                           visualize_learning_curve, visualize_lift,
+                                           visualize_calibration)
 from visualization.shap_viz import visualize_shap_values
 from utils.logging_utils import setup_logger
 from config import DEFAULT_RANDOM_STATE, DEFAULT_THRESHOLD, DEFAULT_DATA_FILE
@@ -30,7 +32,9 @@ def train_tokenizator_model(
         threshold: float = DEFAULT_THRESHOLD,
         random_state: int = DEFAULT_RANDOM_STATE,
         n_splits: int = 5,
-        test_size: float = 0.2) -> Tuple[TokenizatorModel, pd.DataFrame, pd.Series]:
+        test_size: float = 0.2,
+        optimization_metric: str = 'pr_auc',
+        threshold_metric: str = 'f1') -> Tuple[TokenizatorModel, pd.DataFrame, pd.Series]:
     """
     Обучение и оценка модели классификации твитов
 
@@ -41,6 +45,8 @@ def train_tokenizator_model(
         random_state: Seed для генератора случайных чисел
         n_splits: Количество фолдов для кросс-валидации
         test_size: Размер тестовой выборки (0-1)
+        optimization_metric: Метрика для оптимизации гиперпараметров ('pr_auc', 'f1', 'roc_auc')
+        threshold_metric: Метрика для определения порога ('f1', 'precision', 'recall')
 
     Returns:
         Tuple: Обученная модель, тестовые признаки и тестовые целевые значения
@@ -53,20 +59,18 @@ def train_tokenizator_model(
     mlflow.start_run(run_name="tokenizator_model")
 
     try:
-        # 1. Загрузка датасета
         logger.info(f"Загрузка датасета из {data_file}...")
         df = load_data(data_file)
 
-        # Логирование информации о датасете
         mlflow.log_param("dataset_size", len(df))
         mlflow.log_param("positive_ratio", (df['total_trade_volume'] >= threshold).mean())
+        mlflow.log_param("optimization_metric", optimization_metric)
+        mlflow.log_param("threshold_metric", threshold_metric)
 
-        # 2. Извлечение признаков
         logger.info("Извлечение признаков...")
         feature_extractor = FeatureExtractor()
         features_df, invalid_indices = feature_extractor.extract_all_features(df)
 
-        # Удаление невалидных постов
         if invalid_indices:
             logger.info(f"Удаление {len(invalid_indices)} невалидных постов с недоступными изображениями")
             valid_df = df.drop(invalid_indices)
@@ -75,53 +79,54 @@ def train_tokenizator_model(
             valid_df = df
             valid_features_df = features_df
 
-        # 3. Инициализация модели
-        logger.info("Инициализация модели...")
-        model = TokenizatorModel(random_state=random_state)
+        logger.info(
+            f"Инициализация модели с метрикой оптимизации '{optimization_metric}' и метрикой порога '{threshold_metric}'...")
+        model = TokenizatorModel(
+            random_state=random_state,
+            optimization_metric=optimization_metric,
+            threshold_metric=threshold_metric
+        )
 
-        # 4. Предобработка данных
         logger.info("Предобработка данных...")
         X = valid_features_df.copy()
         y = valid_df['total_trade_volume']
         X, y_binary = model.preprocess_data(X, y, threshold=threshold)
 
-        # 5. Удаление сильно коррелирующих признаков
         logger.info("Удаление сильно коррелирующих признаков...")
         X_reduced, dropped_features = model.analyze_feature_correlations(X, threshold=config.CORRELATION_THRESHOLD)
 
-        # 6. Группировка признаков по типу
         logger.info("Группировка признаков по типу...")
         feature_groups = model.group_features(X_reduced)
 
-        # 7. Разделение данных с использованием кросс-валидации
         logger.info(f"Разделение данных с {n_splits}-фолдовой кросс-валидацией...")
         X_train_val, X_test, y_train_val, y_test, kfold = model.split_data(
             X_reduced, y_binary, n_splits=n_splits, test_size=test_size)
 
-        # 8. Анализ распределения классов
+        # Анализ распределения классов
         class_stats = model.analyze_class_distribution(y_train_val)
         mlflow.log_params({
             'imbalance_ratio': class_stats['imbalance_ratio'],
             'uniformity_index': class_stats['uniformity_index']
         })
 
-        # 9. Определение оптимального метода обработки дисбаланса
+        # Определение оптимального метода обработки дисбаланса
         best_imbalance_method, imbalance_params = model.select_optimal_imbalance_method(
             X_train_val, y_train_val, kfold)
         mlflow.log_param('imbalance_method', best_imbalance_method)
 
-        # 10. Обработка дисбаланса с использованием лучшего метода
+        # Обработка дисбаланса с использованием лучшего метода
         X_train_val_balanced, y_train_val_balanced, _ = model.handle_class_imbalance(
             X_train_val, y_train_val, method=best_imbalance_method)
 
-        # 11. Совместная оптимизация гиперпараметров и отбора признаков
-        logger.info("Запуск совместной оптимизации гиперпараметров и отбора признаков...")
+        logger.info(f"Оптимизация параметров модели по метрике {optimization_metric}")
+        logger.info(
+            f"Запуск совместной оптимизации гиперпараметров и отбора признаков по метрике {optimization_metric}...")
         best_params, selected_features = model.optimize_jointly(
             X_train_val_balanced, y_train_val_balanced,
-            cv_outer=3, cv_inner=5, n_trials=30
+            cv_outer=3, cv_inner=5, n_trials=30,
+            optimization_metric=optimization_metric
         )
 
-        # 12. Отбор признаков с оптимальными параметрами
         logger.info("Отбор признаков с использованием оптимальных параметров...")
         X_train_val_selected, selected_features = model.select_features_with_optimal_parameters(
             X_train_val_balanced, y_train_val_balanced,
@@ -131,65 +136,130 @@ def train_tokenizator_model(
         # Обновляем тестовый набор с учетом выбранных признаков
         X_test_selected = X_test[selected_features]
 
-        # 13. Обучение модели с выбранными признаками и оптимальными гиперпараметрами
-        logger.info("Обучение модели с выбранными признаками и оптимальными гиперпараметрами...")
+        logger.info(
+            f"Обучение модели с выбранными признаками и оптимальными гиперпараметрами по метрике {optimization_metric}...")
         model.train(
             X_train_val_selected, y_train_val_balanced, kfold,
-            params=best_params, threshold=model.best_threshold
+            params=best_params, optimization_metric=optimization_metric
         )
 
-        # 14. Анализ стабильности результатов между фолдами
+        # Анализ стабильности результатов между фолдами
         logger.info("Анализ стабильности результатов между фолдами...")
         stability_metrics = model.analyze_fold_stability()
 
-        # 15. Переобучение финальной модели на тренировочных и валидационных данных
-        logger.info("Переобучение финальной модели на тренировочных и валидационных данных...")
+        logger.info("Переобучение финальной модели на всех тренировочных данных...")
         model.train_final_model(
             X_train_val_selected,
             y_train_val_balanced,
             params=best_params
         )
 
-        # 16. Оценка модели на тестовой выборке
-        logger.info("Оценка модели на тестовой выборке...")
-        test_metrics = model.evaluate(X_test_selected, y_test, threshold=model.best_threshold)
+        logger.info(f"Оценка модели на тестовой выборке после оптимизация параметров по метрике {optimization_metric} (без калибровки)...")
+        test_metrics_before_calibration = model.evaluate(X_test_selected, y_test, threshold=0.5)
 
-        # Логирование метрик
-        for metric_name, metric_value in test_metrics.items():
-            if isinstance(metric_value, (int, float)):
-                mlflow.log_metric(metric_name, metric_value)
+        mlflow.log_metrics({
+            'stage1_accuracy': test_metrics_before_calibration['accuracy'],
+            'stage1_precision': test_metrics_before_calibration['precision'],
+            'stage1_recall': test_metrics_before_calibration['recall'],
+            'stage1_f1': test_metrics_before_calibration['f1'],
+            'stage1_roc_auc': test_metrics_before_calibration['roc_auc'],
+            'stage1_pr_auc': test_metrics_before_calibration['pr_auc']
+        })
 
-        # 17. Расчет и визуализация лифта
+        # Сохранение визуализации кривой калибровки до калибровки
+        visualize_calibration_curve(
+            y_test,
+            test_metrics_before_calibration['y_pred_proba'],
+            output_path=os.path.join(output_dir, 'calibration_curve_before.png')
+        )
+
+        # Разделение обучающих данных для калибровки и проверки
+        logger.info("Калибровка вероятностей с помощью Platt scaling")
+        X_calib, X_calib_test, y_calib, y_calib_test = train_test_split(
+            X_train_val_selected, y_train_val_balanced,
+            test_size=0.3, random_state=random_state, stratify=y_train_val_balanced
+        )
+
+        # Выполнение калибровки вероятностей
+        calibration_results = model.calibrate_probabilities(
+            X_calib, y_calib,
+            method='sigmoid', cv=5,
+            output_dir=output_dir
+        )
+
+        mlflow.log_metrics({
+            'brier_score_before': calibration_results.get('brier_score_before', 0),
+            'brier_score_after': calibration_results.get('brier_score_after', 0),
+            'brier_improvement': calibration_results.get('brier_improvement', 0),
+            'log_loss_before': calibration_results.get('log_loss_before', 0),
+            'log_loss_after': calibration_results.get('log_loss_after', 0),
+            'log_loss_improvement': calibration_results.get('log_loss_improvement', 0)
+        })
+
+        logger.info("Оценка модели на тестовой выборке после калибровки (порог 0.5)...")
+        test_metrics_after_calibration = model.evaluate(X_test_selected, y_test, threshold=0.5)
+        mlflow.log_metrics({
+            'stage2_accuracy': test_metrics_after_calibration['accuracy'],
+            'stage2_precision': test_metrics_after_calibration['precision'],
+            'stage2_recall': test_metrics_after_calibration['recall'],
+            'stage2_f1': test_metrics_after_calibration['f1'],
+            'stage2_roc_auc': test_metrics_after_calibration['roc_auc'],
+            'stage2_pr_auc': test_metrics_after_calibration['pr_auc']
+        })
+
+        # Визуализация сравнения кривых калибровки до и после калибровки
+        if model.calibrator.is_calibrated and 'y_pred_proba_calibrated' in test_metrics_after_calibration:
+            visualize_calibration(
+                y_test,
+                test_metrics_before_calibration['y_pred_proba'],
+                test_metrics_after_calibration['y_pred_proba_calibrated'],
+                output_path=os.path.join(output_dir, 'calibration_comparison.png'),
+                title='Сравнение кривых калибровки'
+            )
+
+        logger.info(f"Поиск оптимального порога для максимизации {threshold_metric}")
+
+        # Поиск оптимального порога для откалиброванных вероятностей
+        optimal_threshold = model.find_optimal_threshold(
+            X_calib_test, y_calib_test,
+            threshold_metric=threshold_metric
+        )
+
+        mlflow.log_param('optimal_threshold', optimal_threshold)
+
+        logger.info(f"Итоговая оценка модели после поиска оптимального порога (с калибровкой, порог {optimal_threshold:.4f})...")
+        final_test_metrics = model.evaluate(X_test_selected, y_test, threshold=optimal_threshold)
+        mlflow.log_metrics({
+            'final_accuracy': final_test_metrics['accuracy'],
+            'final_precision': final_test_metrics['precision'],
+            'final_recall': final_test_metrics['recall'],
+            'final_f1': final_test_metrics['f1'],
+            'final_roc_auc': final_test_metrics['roc_auc'],
+            'final_pr_auc': final_test_metrics['pr_auc']
+        })
+
         logger.info("Расчет и визуализация лифта...")
         bin_metrics = model.compute_lift(X_test_selected, y_test, bins=10)
         visualize_lift(bin_metrics, output_path=os.path.join(output_dir, 'lift_charts.png'))
 
-        # 18. Визуализация важности признаков
         logger.info("Визуализация важности признаков...")
-        visualize_feature_importance(model.feature_importance, top_n=30,
-                                     output_path=os.path.join(output_dir, 'feature_importance.png'))
+        visualize_feature_importance(
+            model.feature_importance,
+            top_n=30,
+            output_path=os.path.join(output_dir, 'feature_importance.png')
+        )
 
-        # 19. Визуализация матрицы ошибок
         logger.info("Визуализация матрицы ошибок...")
-        visualize_confusion_matrix(test_metrics['confusion_matrix'],
-                                   output_path=os.path.join(output_dir, 'confusion_matrix.png'))
+        visualize_confusion_matrix(
+            final_test_metrics['confusion_matrix'],
+            output_path=os.path.join(output_dir, 'confusion_matrix.png')
+        )
 
-        # 20. Визуализация ROC-кривой
-        logger.info("Визуализация ROC-кривой...")
-        visualize_roc_curve(y_test, test_metrics['y_pred_proba'],
-                            output_path=os.path.join(output_dir, 'roc_curve.png'))
+        logger.info("Визуализация ROC-кривой и PR-кривой...")
+        y_pred_proba = final_test_metrics.get('y_pred_proba_calibrated', final_test_metrics['y_pred_proba'])
+        visualize_roc_curve(y_test, y_pred_proba, output_path=os.path.join(output_dir, 'roc_curve.png'))
+        visualize_pr_curve(y_test, y_pred_proba, output_path=os.path.join(output_dir, 'pr_curve.png'))
 
-        # 21. Визуализация PR-кривой
-        logger.info("Визуализация PR-кривой...")
-        visualize_pr_curve(y_test, test_metrics['y_pred_proba'],
-                           output_path=os.path.join(output_dir, 'pr_curve.png'))
-
-        # 22. Визуализация кривой калибровки
-        logger.info("Визуализация кривой калибровки...")
-        visualize_calibration_curve(y_test, test_metrics['y_pred_proba'],
-                                    output_path=os.path.join(output_dir, 'calibration_curve.png'))
-
-        # 23. Визуализация кривой обучения
         logger.info("Визуализация кривой обучения...")
         final_params = model.best_params.copy()
         visualize_learning_curve(
@@ -202,26 +272,28 @@ def train_tokenizator_model(
             final_params=final_params
         )
 
-        # 24. Визуализация значений SHAP
         logger.info("Визуализация значений SHAP...")
-        visualize_shap_values(model.model, X_test_selected,
-                              n_samples=min(100, len(X_test_selected)),
-                              output_dir=output_dir)
+        visualize_shap_values(
+            model.model,
+            X_test_selected,
+            n_samples=min(100, len(X_test_selected)),
+            output_dir=output_dir
+        )
 
-        # 25. Сохранение модели
-        logger.info("Сохранение модели...")
+        logger.info("Сохранение итоговой модели...")
         model_path = os.path.join(output_dir, 'tokenizator_model.txt')
         model.save_model(model_path)
 
-        # Логирование артефактов модели
-        for artifact in ['feature_importance.png', 'confusion_matrix.png', 'roc_curve.png',
-                         'pr_curve.png', 'calibration_curve.png', 'learning_curve.png',
-                         'shap_summary.png', 'lift_charts.png']:
+        for artifact in [
+            'feature_importance.png', 'confusion_matrix.png', 'roc_curve.png',
+            'pr_curve.png', 'calibration_curve_before.png', 'calibration_comparison.png',
+            'learning_curve.png', 'lift_charts.png', 'shap_summary.png', 'shap_detailed.png',
+            'shap_top_features.png'
+        ]:
             artifact_path = os.path.join(output_dir, artifact)
             if os.path.exists(artifact_path):
                 mlflow.log_artifact(artifact_path)
 
-        # Логирование модели
         mlflow.lightgbm.log_model(model.model, "lightgbm_model")
 
         logger.info("Обучение и оценка модели успешно завершены!")
@@ -238,7 +310,6 @@ def train_tokenizator_model(
 
 
 if __name__ == "__main__":
-    # Парсинг аргументов командной строки
     parser = argparse.ArgumentParser(description='Обучение и оценка модели классификации твитов')
     parser.add_argument('--data', type=str, default=DEFAULT_DATA_FILE, help='Путь к файлу с данными')
     parser.add_argument('--output', type=str, default='models', help='Директория для сохранения результатов')
@@ -247,10 +318,18 @@ if __name__ == "__main__":
                         help='Seed для генератора случайных чисел')
     parser.add_argument('--n_splits', type=int, default=5, help='Количество фолдов для кросс-валидации')
     parser.add_argument('--test_size', type=float, default=0.2, help='Размер тестовой выборки (0-1)')
+    parser.add_argument('--optimization_metric', type=str, default='pr_auc',
+                        choices=['pr_auc', 'f1', 'roc_auc'],
+                        help='Метрика для оптимизации гиперпараметров')
+    parser.add_argument('--threshold_metric', type=str, default='f1',
+                        choices=['f1', 'precision', 'recall'],
+                        help='Метрика для определения порога')
 
     args = parser.parse_args()
 
     logger.info("Запуск конвейера модели tweet-classifier-model")
+    logger.info(f"Метрика оптимизации гиперпараметров: {args.optimization_metric}")
+    logger.info(f"Метрика определения порога: {args.threshold_metric}")
 
     try:
         # Создание директорий
@@ -264,10 +343,11 @@ if __name__ == "__main__":
             args.threshold,
             args.random_state,
             args.n_splits,
-            args.test_size
+            args.test_size,
+            args.optimization_metric,
+            args.threshold_metric
         )
 
-        # Вывод сводки
         logger.info("Конвейер модели успешно завершен")
 
     except Exception as e:

@@ -1,4 +1,6 @@
 import os
+import pickle
+
 import numpy as np
 import optuna
 import pandas as pd
@@ -9,10 +11,12 @@ from typing import Tuple, List, Dict, Optional, Union
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, auc, roc_auc_score, precision_recall_curve
+
+from .calibration import PlattCalibrator, calibrate_model
 from .preprocessing import preprocess_data
 from .feature_selection import analyze_correlations, group_features
-from .model_training import train_model, predict, split_data
+from .model_training import train_model, predict, split_data, find_optimal_threshold
 from .evaluation import evaluate_model, compute_lift
 from imblearn.over_sampling import RandomOverSampler, SMOTE, ADASYN
 from imblearn.under_sampling import RandomUnderSampler
@@ -42,13 +46,16 @@ class TokenizatorModel:
         fold_results (Dict): Результаты по фолдам кросс-валидации
     """
 
-    def __init__(self, random_state: int = 42):
+    def __init__(self, random_state: int = 42, optimization_metric: str = 'pr_auc', threshold_metric: str = 'f1'):
         """
         Инициализация модели
 
         Args:
             random_state: Seed для генератора случайных чисел
+            optimization_metric: Метрика для оптимизации гиперпараметров ('pr_auc', 'f1', 'roc_auc')
+            threshold_metric: Метрика для определения порога ('f1', 'precision', 'recall')
         """
+
         self.sorted_group_order = None
         self.incremental_results = None
         self.best_params = None
@@ -62,6 +69,9 @@ class TokenizatorModel:
         self.feature_groups = None
         self.model_metrics = {}
         self.fold_results = {}
+        self.calibrator = PlattCalibrator()
+        self.optimization_metric = optimization_metric
+        self.threshold_metric = threshold_metric
 
     def preprocess_data(
             self, X: pd.DataFrame,
@@ -347,28 +357,34 @@ class TokenizatorModel:
             y_train_val: pd.Series,
             kfold,
             params: Optional[Dict] = None,
-            threshold: float = 0.5) -> Dict:
+            threshold: float = 0.5,
+            optimization_metric: Optional[str] = None) -> Dict:
         """
         Обучение модели LightGBM с использованием кросс-валидации
 
         Args:
-            :param X_train_val: DataFrame с признаками обучающей и валидационной выборки
-            :param y_train_val: Серия целевых значений обучающей и валидационной выборки
-            :param kfold: Объект кросс-валидации
-            :param params: Параметры модели LightGBM
-            :param threshold:
+            X_train_val: DataFrame с признаками обучающей и валидационной выборки
+            y_train_val: Серия целевых значений обучающей и валидационной выборки
+            kfold: Объект кросс-валидации
+            params: Параметры модели LightGBM
+            threshold: Порог классификации
+            optimization_metric: Метрика для оптимизации ('pr_auc', 'f1', 'roc_auc')
 
         Returns:
             Dict: Результаты кросс-валидации
         """
-        logger.info(f"Обучение модели LightGBM с кросс-валидацией и порогом {threshold}")
+        if optimization_metric is None:
+            optimization_metric = self.optimization_metric
+
+        logger.info(
+            f"Обучение модели LightGBM с кросс-валидацией, порогом {threshold} и метрикой {optimization_metric}")
 
         # Сохранение имен признаков
         self.feature_names = X_train_val.columns.tolist()
 
-        # Обучение модели с заданным порогом
+        # Обучение модели с заданным порогом и метрикой
         self.model, self.feature_importance, self.fold_results = train_model(
-            X_train_val, y_train_val, kfold, params, self.feature_names, threshold)
+            X_train_val, y_train_val, kfold, params, self.feature_names, threshold, optimization_metric)
 
         logger.info(f"Модель обучена с {len(self.feature_names)} признаками")
 
@@ -441,7 +457,8 @@ class TokenizatorModel:
             y_train_val: pd.Series,
             cv_outer: int = 3,
             cv_inner: int = 5,
-            n_trials: int = 30
+            n_trials: int = 30,
+            optimization_metric: Optional[str] = None
     ) -> Tuple[Dict, List[str]]:
         """
         Совместная оптимизация гиперпараметров и отбора признаков с использованием
@@ -453,12 +470,16 @@ class TokenizatorModel:
             cv_outer: Количество фолдов для внешней кросс-валидации
             cv_inner: Количество фолдов для внутренней кросс-валидации
             n_trials: Количество испытаний Optuna для каждого фолда внешней кросс-валидации
+            optimization_metric: Метрика для оптимизации ('pr_auc', 'f1', 'roc_auc')
 
         Returns:
             Tuple[Dict, List[str]]: Оптимальные гиперпараметры и список выбранных признаков
         """
 
-        logger.info(f"Запуск совместной оптимизации с вложенной кросс-валидацией "
+        if optimization_metric is None:
+            optimization_metric = self.optimization_metric
+
+        logger.info(f"Запуск совместной оптимизации по метрике {optimization_metric} с вложенной кросс-валидацией "
                     f"({cv_outer} внешних фолдов, {cv_inner} внутренних фолдов, {n_trials} испытаний)")
 
         # Если у нас нет сгруппированных признаков, сначала группируем их
@@ -552,10 +573,7 @@ class TokenizatorModel:
                     'verbose': -1
                 }
 
-                # 4. Оптимальный порог классификации
-                threshold = trial.suggest_float('threshold', 0.1, 0.9)
-
-                # 5. Кросс-валидация на внутренних фолдах
+                # 4. Кросс-валидация на внутренних фолдах
                 cv_scores = []
                 for inner_train_idx, inner_val_idx in inner_cv.split(X_train_fold, y_train_fold):
                     # Разделение данных для внутреннего фолда
@@ -578,13 +596,29 @@ class TokenizatorModel:
                         num_boost_round=500
                     )
 
-                    # Оценка на внутреннем валидационном наборе
+                    # Оценка на внутреннем валидационном наборе с выбранной метрикой оптимизации
                     y_pred_proba = model.predict(X_inner_val)
-                    y_pred = (y_pred_proba > threshold).astype(int)
-                    score = f1_score(y_inner_val, y_pred)
+
+                    # Выбор соответствующей метрики
+                    if optimization_metric == 'pr_auc':
+                        # Расчет PR-AUC
+                        precision_curve, recall_curve, _ = precision_recall_curve(y_inner_val, y_pred_proba)
+                        score = auc(recall_curve, precision_curve)
+                    elif optimization_metric == 'roc_auc':
+                        # Расчет ROC-AUC
+                        score = roc_auc_score(y_inner_val, y_pred_proba)
+                    elif optimization_metric == 'f1':
+                        # Расчет F1 (требуется порог)
+                        y_pred_binary = (y_pred_proba > 0.5).astype(int)  # Используем порог 0.5 для оптимизации
+                        score = f1_score(y_inner_val, y_pred_binary)
+                    else:
+                        # По умолчанию используем PR-AUC
+                        precision_curve, recall_curve, _ = precision_recall_curve(y_inner_val, y_pred_proba)
+                        score = auc(recall_curve, precision_curve)
+
                     cv_scores.append(score)
 
-                # Среднее значение F1 по всем внутренним фолдам
+                # Среднее значение метрики по всем внутренним фолдам
                 mean_score = np.mean(cv_scores)
 
                 # Добавление штрафа за большое количество признаков для баланса между качеством и простотой
@@ -608,12 +642,10 @@ class TokenizatorModel:
 
             # Извлечение оптимальных гиперпараметров LightGBM
             for param_name in ['num_leaves', 'learning_rate', 'feature_fraction', 'bagging_fraction',
-                               'bagging_freq', 'lambda_l1', 'lambda_l2', 'min_child_samples', 'max_depth']:
+                               'bagging_freq', 'lambda_l1', 'lambda_l2', 'min_child_samples', 'max_depth',
+                               'min_data_in_leaf']:
                 if param_name in best_trial.params:
                     best_params[param_name] = best_trial.params[param_name]
-
-            # Извлечение оптимального порога
-            best_threshold = best_trial.params.get('threshold', 0.5)
 
             # Извлечение оптимальных групп признаков
             selected_groups = []
@@ -652,28 +684,43 @@ class TokenizatorModel:
             model = lgb.LGBMClassifier(random_state=self.random_state, **params_without_random_state)
             model.fit(X_train_fold[selected_features], y_train_fold)
 
+            # Оценка модели по выбранной метрике оптимизации
             y_pred_proba = model.predict_proba(X_val_fold[selected_features])[:, 1]
-            y_pred = (y_pred_proba > best_threshold).astype(int)
-            val_score = f1_score(y_val_fold, y_pred)
+
+            # Выбор соответствующей метрики для оценки
+            if optimization_metric == 'pr_auc':
+                # Расчет PR-AUC
+                precision_curve, recall_curve, _ = precision_recall_curve(y_val_fold, y_pred_proba)
+                val_score = auc(recall_curve, precision_curve)
+            elif optimization_metric == 'roc_auc':
+                # Расчет ROC-AUC
+                val_score = roc_auc_score(y_val_fold, y_pred_proba)
+            elif optimization_metric == 'f1':
+                # Расчет F1 (требуется порог)
+                y_pred_binary = (y_pred_proba > 0.5).astype(int)  # Используем порог 0.5 для оценки
+                val_score = f1_score(y_val_fold, y_pred_binary)
+            else:
+                # По умолчанию используем PR-AUC
+                precision_curve, recall_curve, _ = precision_recall_curve(y_val_fold, y_pred_proba)
+                val_score = auc(recall_curve, precision_curve)
 
             # Сохранение результатов для текущего фолда
             fold_best_params[fold_idx] = best_params
-            fold_best_params[fold_idx]['threshold'] = best_threshold
             fold_best_features[fold_idx] = selected_features
             fold_best_scores[fold_idx] = val_score
 
-            logger.info(f"Внешний фолд {fold_idx + 1} - Лучший F1: {val_score:.4f}, "
+            logger.info(f"Внешний фолд {fold_idx + 1} - Лучший {optimization_metric}: {val_score:.4f}, "
                         f"Количество признаков: {len(selected_features)}, "
                         f"Выбранные группы: {selected_groups}")
 
-        # Выбор лучшего фолда на основе валидационного F1-score
+        # Выбор лучшего фолда на основе валидационного показателя выбранной метрики
         best_fold = max(fold_best_scores.items(), key=lambda x: x[1])[0]
 
-        logger.info(f"Лучший результат в фолде {best_fold + 1} с F1 = {fold_best_scores[best_fold]:.4f}")
+        logger.info(
+            f"Лучший результат в фолде {best_fold + 1} с {optimization_metric} = {fold_best_scores[best_fold]:.4f}")
 
         # Сохранение оптимальных параметров и признаков
         self.best_params = fold_best_params[best_fold]
-        self.best_threshold = self.best_params.pop('threshold', 0.5)
         self.selected_features = fold_best_features[best_fold]
 
         # Обучение итоговой модели на всех тренировочных данных
@@ -692,13 +739,75 @@ class TokenizatorModel:
             'importance': self.model.feature_importances_
         }).sort_values('importance', ascending=False)
 
-        # Резюме для логирования
-        logger.info(f"Завершена совместная оптимизация. Выбрано {len(self.selected_features)} признаков.")
-        logger.info(f"Оптимальный порог классификации: {self.best_threshold:.4f}")
-        logger.info(f"Оптимальные параметры: {self.best_params}")
+        logger.info(f"Завершена совместная оптимизация с метрикой {optimization_metric}. "
+                    f"Выбрано {len(self.selected_features)} признаков.")
 
         return self.best_params, self.selected_features
 
+    def calibrate_probabilities(self, X_calibration: pd.DataFrame, y_calibration: pd.Series,
+                                method: str = 'sigmoid', cv: int = 5, output_dir: Optional[str] = None) -> Dict:
+        """
+        Калибровка вероятностей модели с помощью Platt scaling
+
+        Args:
+            X_calibration: DataFrame с признаками для калибровки
+            y_calibration: Серия целевых значений для калибровки
+            method: Метод калибровки ('sigmoid' для Platt scaling, 'isotonic' для изотонической регрессии)
+            cv: Количество фолдов для кросс-валидации
+            output_dir: Директория для сохранения визуализаций (опционально)
+
+        Returns:
+            Dict: Словарь с результатами калибровки
+        """
+        logger.info(f"Запуск калибровки вероятностей с методом '{method}'")
+
+        if self.model is None:
+            logger.error("Модель еще не обучена. Невозможно выполнить калибровку.")
+            return {}
+
+        # Если есть выбранные признаки, используем их
+        X_calibration_features = X_calibration
+        if self.selected_features is not None:
+            X_calibration_features = X_calibration[self.selected_features]
+
+        # Выполнение калибровки
+        self.calibrator, calibration_results = calibrate_model(
+            self.model, X_calibration_features, y_calibration,
+            calibration_method=method, cv=cv, output_dir=output_dir
+        )
+
+        logger.info(f"Калибровка завершена. Улучшение Brier score: "
+                    f"{calibration_results['brier_improvement']:.2f}%")
+
+        return calibration_results
+
+    def find_optimal_threshold(self, X_val: pd.DataFrame, y_val: pd.Series,
+                               threshold_metric: Optional[str] = None) -> float:
+        """
+        Поиск оптимального порога классификации для калиброванных вероятностей
+
+        Args:
+            X_val: DataFrame с признаками валидационной выборки
+            y_val: Серия целевых значений валидационной выборки
+            threshold_metric: Метрика для оптимизации порога ('f1', 'precision', 'recall')
+
+        Returns:
+            float: Оптимальный порог
+        """
+        if threshold_metric is None:
+            threshold_metric = self.threshold_metric
+
+        optimal_threshold = find_optimal_threshold(
+            self.model,
+            X_val if self.selected_features is None else X_val[self.selected_features],
+            y_val,
+            threshold_metric,
+            self.calibrator if hasattr(self, 'calibrator') and self.calibrator.is_calibrated else None
+        )
+
+        self.best_threshold = optimal_threshold
+
+        return optimal_threshold
 
     def analyze_fold_stability(self) -> Dict:
         """
@@ -1118,7 +1227,20 @@ class TokenizatorModel:
             logger.error("Модель еще не обучена")
             return False
 
-        # Вызов функции сохранения модели
+        # Сохранение калибратора, если он существует
+        if hasattr(self, 'calibrator') and self.calibrator.is_calibrated:
+            logger.info("Сохранение калибратора вероятностей")
+            calibrator_path = f"{filepath.replace('.txt', '')}_calibrator.pkl"
+            with open(calibrator_path, 'wb') as f:
+                pickle.dump(self.calibrator, f)
+
+        # Дополнительная информация о модели
+        additional_info = {
+            'optimization_metric': self.optimization_metric,
+            'threshold_metric': self.threshold_metric
+        }
+
+        # Вызов функции сохранения модели с расширенной информацией
         return save_model(
             self.model,
             filepath,
@@ -1128,7 +1250,9 @@ class TokenizatorModel:
             self.feature_groups,
             self.model_metrics,
             self.scaler,
-            self.feature_importance
+            self.feature_importance,
+            self.calibrator if hasattr(self, 'calibrator') and self.calibrator.is_calibrated else None,
+            additional_info
         )
 
     def load_model(self, filepath: str = 'tokenizator_model.txt') -> bool:
@@ -1144,20 +1268,40 @@ class TokenizatorModel:
         logger.info(f"Загрузка модели из {filepath}")
 
         try:
-            # Вызов функции загрузки модели
-            self.model, model_info, self.scaler, self.feature_importance = load_model(filepath)
+            # Загрузка модели LightGBM и связанных компонентов
+            model, model_info, scaler, feature_importance, calibrator = load_model(filepath)
 
-            if self.model:
-                # Загрузка дополнительной информации
-                self.best_threshold = model_info.get('best_threshold', 0.5)
-                self.feature_names = model_info.get('feature_names', None)
-                self.selected_features = model_info.get('selected_features', None)
-                self.feature_groups = model_info.get('feature_groups', None)
-                self.model_metrics = model_info.get('model_metrics', {})
-                return True
+            if model is None:
+                logger.error(f"Не удалось загрузить модель из {filepath}")
+                return False
 
-            return False
+            self.model = model
 
+            # Загрузка дополнительной информации о модели
+            self.best_threshold = model_info.get('best_threshold', 0.5)
+            self.feature_names = model_info.get('feature_names', None)
+            self.selected_features = model_info.get('selected_features', None)
+            self.feature_groups = model_info.get('feature_groups', None)
+            self.model_metrics = model_info.get('model_metrics', {})
+
+            # Загрузка метаинформации
+            additional_info = model_info.get('additional_info', {})
+            self.optimization_metric = additional_info.get('optimization_metric', 'pr_auc')
+            self.threshold_metric = additional_info.get('threshold_metric', 'f1')
+
+            # Загрузка масштабировщика
+            self.scaler = scaler
+
+            # Загрузка важности признаков
+            self.feature_importance = feature_importance
+
+            # Загрузка калибратора, если доступен
+            if calibrator is not None:
+                logger.info("Загружен калибратор вероятностей")
+                self.calibrator = calibrator
+
+            logger.info(f"Модель и связанные объекты успешно загружены из {filepath}")
+            return True
         except Exception as e:
             logger.error(f"Ошибка загрузки модели: {e}")
             return False
@@ -1198,5 +1342,12 @@ class TokenizatorModel:
         else:
             X_pred = X_scaled
 
-        # Выполнение предсказаний
-        return predict(self.model, X_pred, threshold)
+        # Получение вероятностей с учетом калибровки
+        if hasattr(self, 'calibrator') and self.calibrator.is_calibrated:
+            logger.info("Применение калибровки вероятностей для предсказания")
+            y_pred_proba = self.calibrator.predict_proba(X_pred)
+            y_pred = (y_pred_proba > threshold).astype(int)
+            return y_pred, y_pred_proba
+        else:
+           # Если нет калибратора, используем стандартный predict
+           return predict(self.model, X_pred, threshold)

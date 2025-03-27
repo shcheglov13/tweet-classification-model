@@ -1,4 +1,5 @@
 """Функции для визуализации метрик производительности модели"""
+import os
 
 import numpy as np
 import pandas as pd
@@ -339,3 +340,44 @@ def visualize_lift(bin_metrics: pd.DataFrame, output_path: str = 'lift_charts.pn
     plt.close()
 
     logger.info(f"Визуализации lift-диаграмм сохранены в '{output_path}'")
+
+def visualize_calibration(y_true: np.ndarray,
+                          y_pred_proba_before: np.ndarray,
+                          y_pred_proba_after: Optional[np.ndarray] = None,
+                          n_bins: int = 10,
+                          output_path: str = 'calibration_curve.png',
+                          title: Optional[str] = None) -> None:
+    """
+    Визуализация кривой калибровки до и после калибровки
+    """
+    # Расчет кривой калибровки до калибровки
+    prob_true_before, prob_pred_before = calibration_curve(y_true, y_pred_proba_before, n_bins=n_bins)
+
+    plt.figure(figsize=(10, 8))
+
+    # Построение кривой калибровки до калибровки
+    plt.plot(prob_pred_before, prob_true_before, marker='o', linewidth=2,
+             label='До калибровки', color='blue')
+
+    # Построение кривой калибровки после калибровки, если предоставлены данные
+    if y_pred_proba_after is not None:
+        prob_true_after, prob_pred_after = calibration_curve(y_true, y_pred_proba_after, n_bins=n_bins)
+        plt.plot(prob_pred_after, prob_true_after, marker='s', linewidth=2,
+                 label='После калибровки', color='green')
+
+    # Построение идеальной кривой калибровки
+    plt.plot([0, 1], [0, 1], linestyle='--', color='gray', label='Идеально калиброванная')
+
+    plt.xlabel('Средняя предсказанная вероятность')
+    plt.ylabel('Доля положительных исходов')
+    plt.title(title or 'Кривая калибровки')
+    plt.legend(loc='lower right')
+    plt.grid(True, alpha=0.3)
+
+    # Создание директории для сохранения, если она не существует
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+
+    plt.savefig(output_path)
+    plt.close()
+
+    logger.info(f"Кривая калибровки сохранена в '{output_path}'")

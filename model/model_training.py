@@ -5,8 +5,8 @@ import pandas as pd
 import logging
 import lightgbm as lgb
 from sklearn.model_selection import train_test_split, StratifiedKFold
-from typing import Tuple, Dict, List, Optional
-from sklearn.metrics import f1_score, precision_score, recall_score
+from typing import Tuple, Dict, List, Optional, Any
+from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score, precision_recall_curve, auc
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,8 @@ def train_model(
         kfold,
         params: Optional[Dict] = None,
         feature_names: Optional[List[str]] = None,
-        threshold: float = 0.5) -> Tuple[lgb.Booster, pd.DataFrame, Dict]:
+        threshold: float = 0.5,
+        optimization_metric: str = 'pr_auc') -> Tuple[lgb.Booster, pd.DataFrame, Dict]:
     """
     Обучение модели LightGBM с использованием кросс-валидации
 
@@ -70,11 +71,13 @@ def train_model(
         kfold: Объект кросс-валидации (StratifiedKFold)
         params: Параметры модели LightGBM
         feature_names: Имена признаков
-        :param threshold:
+        threshold: Порог для классификации
+        optimization_metric: Метрика для оптимизации
+
     Returns:
         Tuple[lgb.Booster, pd.DataFrame, Dict]: Лучшая модель, важность признаков, результаты по фолдам
     """
-    logger.info(f"Обучение модели LightGBM с кросс-валидацией и порогом {threshold}")
+    logger.info(f"Обучение модели LightGBM с кросс-валидацией, порогом {threshold} и метрикой {optimization_metric}")
 
     # Параметры по умолчанию, если не указаны
     if params is None:
@@ -147,15 +150,25 @@ def train_model(
         # Обновление общей важности признаков
         combined_importance['importance'] += fold_importance['importance'] / kfold.n_splits
 
-        # Оценка модели на валидационной выборке, используя переданный порог
+        # Оценка модели на валидационной выборке
         y_pred_proba = model.predict(X_val_fold)
         y_pred_binary = (y_pred_proba > threshold).astype(int)
 
         # Расчет метрик с использованием переданного порога
+        precision, recall, _ = precision_recall_curve(y_val_fold, y_pred_proba)
+        pr_auc = auc(recall, precision)
+
+        f1 = f1_score(y_val_fold, y_pred_binary)
+        precision_val = precision_score(y_val_fold, y_pred_binary)
+        recall_val = recall_score(y_val_fold, y_pred_binary)
+        roc_auc = roc_auc_score(y_val_fold, y_pred_proba)
+
         metrics = {
-            'f1': f1_score(y_val_fold, y_pred_binary),
-            'precision': precision_score(y_val_fold, y_pred_binary),
-            'recall': recall_score(y_val_fold, y_pred_binary)
+            'f1': f1,
+            'precision': precision_val,
+            'recall': recall_val,
+            'pr_auc': pr_auc,
+            'roc_auc': roc_auc
         }
 
         # Сохранение результатов фолда
@@ -164,88 +177,82 @@ def train_model(
             'importance': fold_importance
         }
 
-        logger.info(f"Фолд {fold_idx + 1}: F1 = {metrics['f1']:.4f}")
+        # Логирование метрик в зависимости от метрики оптимизации
+        if optimization_metric == 'pr_auc':
+            logger.info(f"Фолд {fold_idx + 1}: PR-AUC = {pr_auc:.4f}")
+        elif optimization_metric == 'f1':
+            logger.info(f"Фолд {fold_idx + 1}: F1 = {f1:.4f}")
+        elif optimization_metric == 'roc_auc':
+            logger.info(f"Фолд {fold_idx + 1}: ROC-AUC = {roc_auc:.4f}")
+        else:
+            logger.info(f"Фолд {fold_idx + 1}: F1 = {f1:.4f}, PR-AUC = {pr_auc:.4f}, ROC-AUC = {roc_auc:.4f}")
 
-        # Проверка, является ли текущая модель лучшей
-        if metrics['f1'] > best_val_metric:
-            best_val_metric = metrics['f1']
+        # Проверка, является ли текущая модель лучшей по выбранной метрике
+        current_metric = metrics.get(optimization_metric, f1)  # По умолчанию F1 если метрика не найдена
+        if current_metric > best_val_metric:
+            best_val_metric = current_metric
             best_model = model
 
     # Сортировка важности признаков
     combined_importance = combined_importance.sort_values('importance', ascending=False)
 
-    logger.info(f"Кросс-валидация завершена. Лучший F1: {best_val_metric:.4f}")
+    logger.info(f"Кросс-валидация завершена. Лучший {optimization_metric}: {best_val_metric:.4f}")
 
     return best_model, combined_importance, fold_results
 
 
 def find_optimal_threshold(
-        params: Dict,
-        X_train_val: pd.DataFrame,
-        y_train_val: pd.Series,
-        kfold) -> float:
+        model: Any, X_val: pd.DataFrame, y_val: pd.Series,
+        threshold_metric: str = 'f1',
+        calibrator: Optional[Any] = None) -> float:
     """
-    Поиск оптимального порога с обучением отдельной модели для каждого фолда
+    Поиск оптимального порога классификации для калиброванных вероятностей
+
+    Args:
+        model: Обученная модель
+        X_val: DataFrame с признаками валидационной выборки
+        y_val: Серия целевых значений валидационной выборки
+        threshold_metric: Метрика для оптимизации порога ('f1', 'precision', 'recall')
+        calibrator: Объект калибратора вероятностей (опционально)
+
+    Returns:
+        float: Оптимальный порог
     """
-    logger.info("Поиск оптимального порога классификации с кросс-валидацией")
+    logger.info(f"Поиск оптимального порога классификации с метрикой {threshold_metric}")
 
-    # Инициализация массивов для хранения предсказаний и истинных значений
-    all_preds = []
-    all_true = []
+    # Получение предсказаний с учетом калибровки, если доступна
+    if calibrator is not None and hasattr(calibrator, 'is_calibrated') and calibrator.is_calibrated:
+        y_pred_proba = calibrator.predict_proba(X_val)
+        logger.info("Используем калиброванные вероятности для поиска порога")
+    else:
+        y_pred_proba = model.predict(X_val)
+        logger.info("Используем некалиброванные вероятности для поиска порога")
 
-    # Получение предсказаний на каждом фолде с обучением модели
-    for train_idx, val_idx in kfold.split(X_train_val, y_train_val):
-        # Разделение данных для текущего фолда
-        X_train_fold = X_train_val.iloc[train_idx]
-        y_train_fold = y_train_val.iloc[train_idx]
-        X_val_fold = X_train_val.iloc[val_idx]
-        y_val_fold = y_train_val.iloc[val_idx]
-
-        # Создание объектов датасета
-        train_data = lgb.Dataset(X_train_fold, label=y_train_fold)
-        val_data = lgb.Dataset(X_val_fold, label=y_val_fold, reference=train_data)
-
-        # Обучение модели на текущем фолде
-        model = lgb.train(
-            params,
-            train_data,
-            valid_sets=[val_data],
-            callbacks=[lgb.early_stopping(50)],
-            num_boost_round=1000
-        )
-
-        # Получение предсказаний для текущего валидационного фолда
-        y_pred_val = model.predict(X_val_fold)
-
-        # Сохранение предсказаний и истинных значений
-        all_preds.extend(y_pred_val)
-        all_true.extend(y_val_fold)
-
-    # Преобразование в numpy массивы
-    all_preds = np.array(all_preds)
-    all_true = np.array(all_true)
-
-    # Проверка различных порогов и вычисление F1-scores
+    # Поиск оптимального порога с использованием выбранной метрики
     thresholds = np.arange(0.1, 0.9, 0.01)
-    f1_scores = []
-    precision_scores = []
-    recall_scores = []
+    scores = []
 
     for threshold in thresholds:
-        y_pred_binary = (all_preds > threshold).astype(int)
-        f1 = f1_score(all_true, y_pred_binary)
-        precision = precision_score(all_true, y_pred_binary)
-        recall = recall_score(all_true, y_pred_binary)
+        y_pred = (y_pred_proba > threshold).astype(int)
 
-        f1_scores.append(f1)
-        precision_scores.append(precision)
-        recall_scores.append(recall)
+        # Выбор метрики для оптимизации порога
+        if threshold_metric == 'f1':
+            score = f1_score(y_val, y_pred)
+        elif threshold_metric == 'precision':
+            score = precision_score(y_val, y_pred)
+        elif threshold_metric == 'recall':
+            score = recall_score(y_val, y_pred)
+        else:
+            # По умолчанию используем F1
+            score = f1_score(y_val, y_pred)
 
-    # Поиск порога с наивысшим F1-score
-    best_idx = np.argmax(f1_scores)
+        scores.append(score)
+
+    # Поиск порога с наивысшим значением метрики
+    best_idx = np.argmax(scores)
     best_threshold = thresholds[best_idx]
 
-    logger.info(f"Оптимальный порог: {best_threshold:.4f} с F1-score: {f1_scores[best_idx]:.4f}")
+    logger.info(f"Оптимальный порог: {best_threshold:.4f} с {threshold_metric}: {scores[best_idx]:.4f}")
 
     return best_threshold
 
