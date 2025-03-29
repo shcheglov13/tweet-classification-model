@@ -4,13 +4,14 @@ import pandas as pd
 import logging
 from sklearn.preprocessing import StandardScaler
 from typing import Tuple, Optional
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 
 def scale_features(X: pd.DataFrame, scaler: Optional[StandardScaler] = None) -> Tuple[pd.DataFrame, StandardScaler]:
     """
-    Масштабирование признаков
+    Масштабирование признаков с сохранением NaN значений на их местах
 
     Args:
         X: DataFrame с признаками
@@ -19,23 +20,35 @@ def scale_features(X: pd.DataFrame, scaler: Optional[StandardScaler] = None) -> 
     Returns:
         Tuple[pd.DataFrame, StandardScaler]: Масштабированные признаки и масштабировщик
     """
-    logger.info("Масштабирование признаков...")
+    logger.info("Масштабирование признаков с сохранением NaN значений...")
 
+    # Сохраняем маску NaN значений до масштабирования
+    nan_mask = X.isna()
+
+    # Временно заполняем NaN, чтобы StandardScaler мог работать
+    # Используем 0, но только для масштабирования
+    X_temp = X.fillna(0)
+
+    # Масштабирование
     if scaler is None:
         scaler = StandardScaler()
-        X_scaled = pd.DataFrame(
-            scaler.fit_transform(X),
-            columns=X.columns,
-            index=X.index
-        )
+        X_scaled_values = scaler.fit_transform(X_temp)
     else:
-        X_scaled = pd.DataFrame(
-            scaler.transform(X),
-            columns=X.columns,
-            index=X.index
-        )
+        X_scaled_values = scaler.transform(X_temp)
+
+    # Создаем новый DataFrame из масштабированных значений
+    X_scaled = pd.DataFrame(
+        X_scaled_values,
+        columns=X.columns,
+        index=X.index
+    )
+
+    # Восстанавливаем NaN значения в местах, где они были изначально
+    for col in X.columns:
+        X_scaled.loc[nan_mask[col], col] = np.nan
 
     logger.info(f"Признаки масштабированы: {X_scaled.shape}")
+    logger.info(f"Сохранено {nan_mask.sum().sum()} NaN значений")
 
     return X_scaled, scaler
 
@@ -60,48 +73,13 @@ def binarize_target(y: pd.Series, threshold: float = 100.0) -> pd.Series:
 
     return y_binary
 
-
-def handle_missing_values(df: pd.DataFrame, strategy: str = 'mean') -> pd.DataFrame:
-    """
-    Обработка отсутствующих значений в DataFrame
-
-    Args:
-        df: DataFrame с данными
-        strategy: Стратегия заполнения ('mean', 'median', 'zero')
-
-    Returns:
-        pd.DataFrame: DataFrame с заполненными отсутствующими значениями
-    """
-    logger.info(f"Обработка отсутствующих значений со стратегией '{strategy}'...")
-
-    missing_count = df.isna().sum().sum()
-    if missing_count == 0:
-        logger.info("Отсутствующие значения не найдены")
-        return df
-
-    logger.info(f"Найдено {missing_count} отсутствующих значений")
-
-    df_filled = df.copy()
-
-    if strategy == 'mean':
-        df_filled = df_filled.fillna(df_filled.mean())
-    elif strategy == 'median':
-        df_filled = df_filled.fillna(df_filled.median())
-    elif strategy == 'zero':
-        df_filled = df_filled.fillna(0)
-    else:
-        logger.warning(f"Неизвестная стратегия: {strategy}. Используется заполнение нулями.")
-        df_filled = df_filled.fillna(0)
-
-    return df_filled
-
-
 def preprocess_data(X: pd.DataFrame, y: Optional[pd.Series] = None,
                     threshold: float = 100.0,
                     scaler: Optional[StandardScaler] = None) -> Tuple[
     pd.DataFrame, Optional[pd.Series], StandardScaler]:
     """
-    Полная предобработка данных включая масштабирование признаков и бинаризацию цели
+    Полная предобработка данных включая масштабирование признаков и бинаризацию цели.
+    Сохраняет NaN значения в признаках для использования с LightGBM.
 
     Args:
         X: DataFrame с признаками
@@ -110,20 +88,34 @@ def preprocess_data(X: pd.DataFrame, y: Optional[pd.Series] = None,
         scaler: Предварительно настроенный масштабировщик (опционально)
 
     Returns:
-        Tuple: Обработанные признаки, бинаризованная цель (если предоставлена) и масштабировщик
+        Tuple: Обработанные признаки с сохраненными NaN, бинаризованная цель (если предоставлена) и масштабировщик
     """
     logger.info(f"Начало предобработки данных с порогом {threshold}...")
 
-    # Обработка отсутствующих значений в признаках
-    X = handle_missing_values(X, strategy='zero')
+    # Подсчет NaN до масштабирования
+    initial_nan_count = X.isna().sum().sum()
+    logger.info(f"Исходные данные содержат {initial_nan_count} NaN значений")
 
-    # Масштабирование признаков
+    # Проверка, есть ли колонки, содержащие только NaN
+    nan_columns = X.columns[X.isna().all()].tolist()
+    if nan_columns:
+        logger.warning(f"Обнаружены колонки, содержащие только NaN: {nan_columns}")
+        # Заполняем их нулями, иначе они могут вызвать проблемы
+        X = X.copy()
+        X[nan_columns] = X[nan_columns].fillna(0)
+        logger.info(f"Колонки с только NaN заполнены нулями для стабильности обработки")
+
+    # Масштабирование признаков с сохранением NaN
     X_scaled, scaler = scale_features(X, scaler)
 
     # Бинаризация целевой переменной, если она предоставлена
     y_binary = None
     if y is not None:
         y_binary = binarize_target(y, threshold)
+
+    # Проверка, что NaN сохранились
+    final_nan_count = X_scaled.isna().sum().sum()
+    logger.info(f"После предобработки сохранено {final_nan_count} NaN значений")
 
     logger.info("Предобработка данных завершена")
 

@@ -424,7 +424,9 @@ class TokenizatorModel:
                     'min_child_samples': 20,
                     'max_depth': 8,
                     'random_state': self.random_state,
-                    'verbose': -1
+                    'verbose': -1,
+                    'use_missing': True,
+                    'zero_as_missing': False
                 }
 
         # Сохранение имен признаков
@@ -564,7 +566,9 @@ class TokenizatorModel:
                     'max_depth': trial.suggest_int('max_depth', 3, 6),
                     'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 10, 100),
                     'random_state': self.random_state,
-                    'verbose': -1
+                    'verbose': -1,
+                    'use_missing': True,
+                    'zero_as_missing': False
                 }
 
                 # 4. Кросс-валидация на внутренних фолдах

@@ -95,7 +95,9 @@ def train_model(
             'lambda_l2': 0.1,
             'min_child_samples': 20,
             'max_depth': 8,
-            'random_state': 42
+            'random_state': 42,
+            'use_missing': True,
+            'zero_as_missing': False
         }
 
         # Добавим GPU параметры только если они были в исходных params
